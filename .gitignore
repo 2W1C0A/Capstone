@@ -1,7 +1,11 @@
-# Project data — raw Unfallatlas releases (~360 MB), not committed.
-# Downloaded rather than versioned; see README.
-data/
+# Raw Unfallatlas releases (~360 MB) are downloaded, not versioned.
+# The processed dataset is small enough to commit, and doing so lets the team
+# and the deployed app use the cleaned crash table without reprocessing.
+data/*
 !data/.gitkeep
+!data/processed/
+data/processed/*
+!data/processed/berlin_bike_2018_2025.csv
 
 # Generated outputs
 reports/*.html
