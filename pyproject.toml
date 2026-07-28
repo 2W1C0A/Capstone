@@ -1,6 +1,7 @@
 [project]
-name = "ds-ml-project-template"
+name = "berlin-bike-safety"
 version = "0.1.0"
+description = "Exposure-aware bicycle risk analysis and safe-route routing for Berlin"
 requires-python = ">=3.11"
 dependencies = [
     "plotly>=6.8.0",
