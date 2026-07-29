@@ -1,537 +1,249 @@
-# ============================================================
-# 2W1C Streamlit App Draft
-# Machine-Learning-Based Bicycle Safety Routing for Berlin
-# ============================================================
+from __future__ import annotations
 
-import streamlit as st
-import pandas as pd
-import numpy as np
-import folium
+import json
 from pathlib import Path
-from datetime import datetime
 
-# Optional: better Folium display inside Streamlit
+import pandas as pd
+import streamlit as st
+
 try:
     from streamlit_folium import st_folium
-    STREAMLIT_FOLIUM_AVAILABLE = True
+    HAS_STREAMLIT_FOLIUM = True
 except ImportError:
-    STREAMLIT_FOLIUM_AVAILABLE = False
     import streamlit.components.v1 as components
+    HAS_STREAMLIT_FOLIUM = False
 
+from src.config import (
+    CLEAN_ACCIDENT_FILE,
+    EDGE_RISK_FILE,
+    MODEL_FILE,
+    METRICS_FILE,
+    OSM_GRAPH_FILE,
+    SPATIAL_RISK_FILE,
+)
+from src.route_engine import RouteEngine
+from src.visualization import route_summary_table
 
-# ============================================================
-# 1. Page configuration
-# ============================================================
 
 st.set_page_config(
-    page_title="2W1C Berlin Bicycle Safety Routing",
+    page_title="2W1C Integrated Bicycle Safety Routing",
     page_icon="🚲",
-    layout="wide"
+    layout="wide",
 )
 
 
-# ============================================================
-# 2. Helper functions
-# ============================================================
+def show_map(m, key="route_map"):
+    if HAS_STREAMLIT_FOLIUM:
+        st_folium(m, width=None, height=580, key=key, returned_objects=[])
+    else:
+        components.html(m._repr_html_(), height=580)
+
+
+@st.cache_resource
+def load_engine():
+    return RouteEngine(
+        graph_file=OSM_GRAPH_FILE,
+        edge_risk_file=EDGE_RISK_FILE if EDGE_RISK_FILE.exists() else SPATIAL_RISK_FILE,
+        model_file=MODEL_FILE,
+        spatial_risk_file=SPATIAL_RISK_FILE,
+    )
+
 
 @st.cache_data
-def load_accident_data():
-    """
-    Load cleaned Berlin bicycle accident data if available.
-    If the file is not available, return None.
-    """
-    possible_paths = [
-        Path("data/processed/berlin_bike_accidents_clean.csv"),
-        Path("../data/processed/berlin_bike_accidents_clean.csv"),
-        Path("berlin_bike_accidents_clean.csv")
-    ]
-
-    for path in possible_paths:
-        if path.exists():
-            return pd.read_csv(path)
-
+def load_accident_summary():
+    if CLEAN_ACCIDENT_FILE.exists():
+        df = pd.read_csv(CLEAN_ACCIDENT_FILE)
+        return df
     return None
 
 
-def create_placeholder_map():
-    """
-    Create a simple Berlin map for the draft app.
-    This will be replaced later by fastest vs safest route map.
-    """
-    berlin_center = [52.5200, 13.4050]
-
-    m = folium.Map(
-        location=berlin_center,
-        zoom_start=12,
-        tiles="OpenStreetMap"
-    )
-
-    # Example markers
-    folium.Marker(
-        location=[52.5219, 13.4132],
-        popup="Example start: Alexanderplatz",
-        tooltip="Start",
-        icon=folium.Icon(color="blue", icon="play")
-    ).add_to(m)
-
-    folium.Marker(
-        location=[52.5163, 13.3777],
-        popup="Example destination: Brandenburg Gate",
-        tooltip="Destination",
-        icon=folium.Icon(color="black", icon="flag")
-    ).add_to(m)
-
-    # Example fastest route line
-    folium.PolyLine(
-        locations=[
-            [52.5219, 13.4132],
-            [52.5200, 13.4000],
-            [52.5163, 13.3777]
-        ],
-        color="red",
-        weight=5,
-        opacity=0.8,
-        tooltip="Fastest route example"
-    ).add_to(m)
-
-    # Example safer route line
-    folium.PolyLine(
-        locations=[
-            [52.5219, 13.4132],
-            [52.5250, 13.3950],
-            [52.5220, 13.3850],
-            [52.5163, 13.3777]
-        ],
-        color="green",
-        weight=5,
-        opacity=0.8,
-        tooltip="ML-safest route example"
-    ).add_to(m)
-
-    return m
+@st.cache_data
+def load_metrics():
+    if METRICS_FILE.exists():
+        return json.loads(METRICS_FILE.read_text(encoding="utf-8"))
+    return None
 
 
-def mock_compare_routes(start_location, destination, hour, weekday, safety_preference):
-    """
-    Temporary mock function for draft app layout.
+for key, value in {
+    "route_result": None,
+    "route_map": None,
+    "route_error": None,
+}.items():
+    if key not in st.session_state:
+        st.session_state[key] = value
 
-    Later, replace this with the real route engine:
-        compare_routes_ml(start, end, hour, weekday, safety_preference)
-    """
-
-    fastest_distance = 3.2
-    safest_distance = 3.7
-
-    fastest_risk = 0.42
-    safest_risk = 0.28
-
-    extra_distance = safest_distance - fastest_distance
-    risk_reduction = fastest_risk - safest_risk
-
-    result = {
-        "fastest_distance_km": fastest_distance,
-        "safest_distance_km": safest_distance,
-        "extra_distance_km": extra_distance,
-        "fastest_risk": fastest_risk,
-        "safest_risk": safest_risk,
-        "risk_reduction": risk_reduction,
-        "recommendation": (
-            "Choose the ML-safest route. It is slightly longer, "
-            "but the predicted accident risk is lower."
-        )
-    }
-
-    return result
-
-
-def display_folium_map(m):
-    """
-    Display Folium map in Streamlit.
-    """
-    if STREAMLIT_FOLIUM_AVAILABLE:
-        st_folium(m, width=None, height=550)
-    else:
-        map_html = m._repr_html_()
-        components.html(map_html, height=550)
-
-
-# ============================================================
-# 3. Sidebar
-# ============================================================
 
 st.sidebar.title("🚲 2W1C")
-st.sidebar.markdown("### Bicycle Safety Routing for Berlin")
+st.sidebar.markdown("### Integrated ML + GIS bicycle safety routing")
 
-st.sidebar.markdown("---")
-
-start_location = st.sidebar.text_input(
-    "Start location",
-    value="Alexanderplatz, Berlin"
+start_address = st.sidebar.text_input(
+    "Start address",
+    value="Alexanderplatz, Berlin, Germany",
 )
 
-destination = st.sidebar.text_input(
-    "Destination",
-    value="Brandenburg Gate, Berlin"
+destination_address = st.sidebar.text_input(
+    "Destination address",
+    value="Brandenburg Gate, Berlin, Germany",
 )
 
-travel_date = st.sidebar.date_input(
-    "Travel date",
-    value=datetime.today()
-)
+month = st.sidebar.slider("Month", min_value=1, max_value=12, value=7)
+hour = st.sidebar.slider("Travel hour", min_value=0, max_value=23, value=8)
 
-travel_hour = st.sidebar.slider(
-    "Travel hour",
-    min_value=0,
-    max_value=23,
-    value=8
-)
-
+weekday_map = {
+    "Sunday": 1,
+    "Monday": 2,
+    "Tuesday": 3,
+    "Wednesday": 4,
+    "Thursday": 5,
+    "Friday": 6,
+    "Saturday": 7,
+}
 weekday_name = st.sidebar.selectbox(
     "Weekday",
-    options=[
-        "Monday", "Tuesday", "Wednesday", "Thursday",
-        "Friday", "Saturday", "Sunday"
-    ],
-    index=2
+    options=list(weekday_map.keys()),
+    index=2,
 )
+day_of_week = weekday_map[weekday_name]
 
 safety_preference = st.sidebar.slider(
     "Safety preference",
     min_value=1,
     max_value=10,
     value=7,
-    help="Higher value means the route engine will avoid risky road segments more strongly."
+    help="Higher value means the route engine avoids predicted-risk segments more strongly.",
 )
 
-run_button = st.sidebar.button("Find safer route")
+run_button = st.sidebar.button("Compare routes", type="primary")
 
-st.sidebar.markdown("---")
-
-st.sidebar.info(
-    "Current version: draft layout. "
-    "The final version will use an ML model and OSM routing engine."
-)
-
-
-# ============================================================
-# 4. Main title
-# ============================================================
-
-st.title("🚲 2W1C: ML-Based Bicycle Safety Routing for Berlin")
+st.title("🚲 2W1C: Integrated Bicycle Safety Routing for Berlin")
 
 st.markdown(
     """
-    This app compares the **fastest bicycle route** with an **ML-safest route**.
+    This version integrates **Person B's GIS risk analysis** with an **end-to-end ML pipeline**.
 
-    The final system will use:
+    It compares three routes:
 
-    - Unfallatlas bicycle accident data
-    - OpenStreetMap road features
-    - Time features such as hour, weekday, rush hour, and season
-    - A machine-learning model to predict road-segment accident risk
+    1. **Fastest route** based on distance  
+    2. **Historical GIS-risk route** based on severity-weighted spatial risk  
+    3. **ML-safest route** based on predicted accident risk  
     """
 )
 
+if run_button:
+    try:
+        with st.spinner("Calculating fastest, historical-risk, and ML-safest routes..."):
+            engine = load_engine()
+            result, route_map = engine.compare_and_map(
+                start_address=start_address,
+                destination_address=destination_address,
+                month=month,
+                hour=hour,
+                day_of_week=day_of_week,
+                safety_preference=safety_preference,
+            )
 
-# ============================================================
-# 5. Load data
-# ============================================================
+        st.session_state.route_result = result
+        st.session_state.route_map = route_map
+        st.session_state.route_error = None
 
-df_accidents = load_accident_data()
-
-if df_accidents is not None:
-    st.success(f"Accident dataset loaded successfully: {df_accidents.shape[0]:,} rows × {df_accidents.shape[1]} columns")
-else:
-    st.warning(
-        "Clean accident dataset not found yet. "
-        "The app is running in draft mode with example data."
-    )
+    except Exception as exc:
+        st.session_state.route_result = None
+        st.session_state.route_map = None
+        st.session_state.route_error = str(exc)
 
 
-# ============================================================
-# 6. Tabs
-# ============================================================
-
-tab1, tab2, tab3, tab4 = st.tabs([
-    "🗺️ Route Demo",
-    "📊 Data Overview",
-    "🤖 ML Model",
-    "ℹ️ About Project"
+tab1, tab2, tab3 = st.tabs([
+    "🗺️ Route comparison",
+    "📊 Data",
+    "🤖 Model",
 ])
 
 
-# ============================================================
-# Tab 1: Route Demo
-# ============================================================
-
 with tab1:
-    st.subheader("Fastest Route vs ML-Safest Route")
+    st.subheader("Route Comparison")
 
-    col_input, col_result = st.columns([1, 1])
+    if st.session_state.route_error:
+        st.error(st.session_state.route_error)
 
-    with col_input:
-        st.markdown("### User Input")
-
-        st.write(f"**Start:** {start_location}")
-        st.write(f"**Destination:** {destination}")
-        st.write(f"**Date:** {travel_date}")
-        st.write(f"**Hour:** {travel_hour}:00")
-        st.write(f"**Weekday:** {weekday_name}")
-        st.write(f"**Safety preference:** {safety_preference}/10")
-
-    with col_result:
-        st.markdown("### Route Summary")
-
-        if run_button:
-            result = mock_compare_routes(
-                start_location=start_location,
-                destination=destination,
-                hour=travel_hour,
-                weekday=weekday_name,
-                safety_preference=safety_preference
-            )
-
-            st.metric(
-                label="Fastest route distance",
-                value=f"{result['fastest_distance_km']:.2f} km"
-            )
-
-            st.metric(
-                label="ML-safest route distance",
-                value=f"{result['safest_distance_km']:.2f} km",
-                delta=f"+{result['extra_distance_km']:.2f} km"
-            )
-
-            st.metric(
-                label="Predicted risk reduction",
-                value=f"{result['risk_reduction']:.2f}",
-                delta="Lower risk"
-            )
-
-            st.success(result["recommendation"])
-
-        else:
-            st.info("Click **Find safer route** in the sidebar to run the route comparison.")
-
-    st.markdown("### Map")
-
-    m = create_placeholder_map()
-    display_folium_map(m)
-
-    st.caption(
-        "Red line = example fastest route. Green line = example ML-safest route. "
-        "This draft map will be replaced by real OSM route results."
-    )
-
-
-# ============================================================
-# Tab 2: Data Overview
-# ============================================================
-
-with tab2:
-    st.subheader("Berlin Bicycle Accident Data")
-
-    if df_accidents is not None:
-        st.markdown("### Dataset Preview")
-        st.dataframe(df_accidents.head(20), use_container_width=True)
-
-        st.markdown("### Basic Information")
+    if st.session_state.route_result is None:
+        st.info("Use the sidebar and click **Compare routes**.")
+    else:
+        result = st.session_state.route_result
+        summary = route_summary_table(result)
 
         col1, col2, col3 = st.columns(3)
 
-        with col1:
-            st.metric("Rows", f"{df_accidents.shape[0]:,}")
+        fastest = result["fastest_summary"]
+        historical = result["historical_summary"]
+        ml = result["ml_summary"]
 
-        with col2:
-            st.metric("Columns", f"{df_accidents.shape[1]:,}")
+        col1.metric("Fastest distance", f"{fastest['distance_km']:.2f} km")
+        col2.metric("Historical-risk distance", f"{historical['distance_km']:.2f} km")
+        col3.metric("ML-safest distance", f"{ml['distance_km']:.2f} km")
 
-        with col3:
-            if "year" in df_accidents.columns:
-                st.metric(
-                    "Years",
-                    f"{df_accidents['year'].min()}–{df_accidents['year'].max()}"
-                )
-            else:
-                st.metric("Years", "Not available")
+        st.markdown("### Summary table")
+        st.dataframe(summary, use_container_width=True)
 
-        if "hour" in df_accidents.columns:
-            st.markdown("### Accidents by Hour")
-            hour_counts = df_accidents["hour"].value_counts().sort_index()
-            st.bar_chart(hour_counts)
+        st.markdown("### Recommendation")
+        st.text(result["recommendation_text"])
 
-        if "month" in df_accidents.columns:
-            st.markdown("### Accidents by Month")
-            month_counts = df_accidents["month"].value_counts().sort_index()
-            st.bar_chart(month_counts)
+        st.markdown("### Map")
+        show_map(st.session_state.route_map)
 
+
+with tab2:
+    st.subheader("Data Overview")
+    df = load_accident_summary()
+
+    if df is None:
+        st.warning("Clean accident data not found. Run the pipeline first.")
     else:
-        st.info(
-            """
-            In the final version, this tab will show:
+        st.success(f"Clean accident data loaded: {df.shape[0]:,} rows × {df.shape[1]} columns")
 
-            - Number of Berlin bicycle accidents
-            - Accidents by year
-            - Accidents by hour
-            - Accidents by weekday
-            - Accident severity distribution
-            - District-level patterns
-            """
-        )
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Rows", f"{df.shape[0]:,}")
+        col2.metric("Years", f"{int(df['year'].min())}–{int(df['year'].max())}" if "year" in df.columns else "NA")
+        col3.metric("Serious/fatal rate", f"{100*df['serious_or_fatal'].mean():.1f}%" if "serious_or_fatal" in df.columns else "NA")
 
+        st.dataframe(df.head(20), use_container_width=True)
 
-# ============================================================
-# Tab 3: ML Model
-# ============================================================
+        if "hour" in df.columns:
+            st.markdown("### Accidents by hour")
+            st.bar_chart(df["hour"].value_counts().sort_index())
+
+        if "month" in df.columns:
+            st.markdown("### Accidents by month")
+            st.bar_chart(df["month"].value_counts().sort_index())
+
 
 with tab3:
-    st.subheader("Machine Learning Accident-Risk Model")
+    st.subheader("Machine Learning Model")
+    metrics = load_metrics()
+
+    if metrics is None:
+        st.warning("Model metrics not found. Run the pipeline first.")
+    else:
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("ROC-AUC", f"{metrics['roc_auc']:.3f}" if metrics["roc_auc"] is not None else "NA")
+        col2.metric("PR-AUC", f"{metrics['pr_auc']:.3f}")
+        col3.metric("Top-10% recall", f"{metrics['top10_recall']:.3f}")
+        col4.metric("Top-20% recall", f"{metrics['top20_recall']:.3f}")
+
+        st.markdown("### Train/Test")
+        st.write({
+            "n_train": metrics.get("n_train"),
+            "n_test": metrics.get("n_test"),
+            "positive_rate_train": metrics.get("positive_rate_train"),
+            "positive_rate_test": metrics.get("positive_rate_test"),
+        })
 
     st.markdown(
         """
-        The main AI task is:
+        **ML task:** road segment + time + road features + historical GIS risk → accident risk.
 
-        > Predict relative bicycle accident risk for each Berlin road segment at a given time.
-
-        The model will use three groups of features:
+        The historical spatial-risk model is used as both:
+        - a baseline
+        - an input feature for the ML model
         """
     )
 
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-        st.markdown(
-            """
-            ### Road features
-            - Road type
-            - Road length
-            - Cycleway availability
-            - Speed limit
-            - Intersection density
-            """
-        )
-
-    with col2:
-        st.markdown(
-            """
-            ### Time features
-            - Hour
-            - Weekday
-            - Weekend
-            - Rush hour
-            - Season
-            """
-        )
-
-    with col3:
-        st.markdown(
-            """
-            ### Historical features
-            - Past accident count
-            - Past serious accidents
-            - Hotspot score
-            - Severity-weighted risk
-            """
-        )
-
-    st.markdown("---")
-
-    st.markdown("### Baseline vs ML Model")
-
-    model_table = pd.DataFrame({
-        "Approach": [
-            "Historical hotspot baseline",
-            "Rule-based route score",
-            "ML accident-risk model"
-        ],
-        "Description": [
-            "Uses only past accident counts",
-            "Combines accident counts and simple road rules",
-            "Learns risk from road, time, and history features"
-        ],
-        "AI Level": [
-            "Low",
-            "Medium",
-            "High"
-        ]
-    })
-
-    st.dataframe(model_table, use_container_width=True)
-
-    st.info(
-        "In the final version, this tab will show model performance, "
-        "ROC-AUC, PR-AUC, top-k recall, and feature importance."
-    )
-
-
-# ============================================================
-# Tab 4: About Project
-# ============================================================
-
-with tab4:
-    st.subheader("About 2W1C")
-
-    st.markdown(
-        """
-        **2W1C** is a machine-learning-based bicycle safety routing system for Berlin.
-
-        The project does not only show historical accident hotspots.  
-        The core AI part is a machine-learning model that predicts road-segment accident risk.
-
-        The predicted risk is then used by a route engine to compare:
-
-        - the fastest route
-        - the ML-safest route
-
-        The final goal is to help cyclists understand the safety trade-off between speed and risk.
-        """
-    )
-
-    st.markdown("### Project Workflow")
-
-    st.code(
-        """
-Unfallatlas bicycle accident data
-+
-OpenStreetMap road network
-+
-Time features
-↓
-Map accidents to road segments
-↓
-Create positive and negative training samples
-↓
-Train ML accident-risk model
-↓
-Predict risk for each road segment
-↓
-Use predicted risk as routing cost
-↓
-Compare fastest route vs ML-safest route
-↓
-Show result in Streamlit
-        """,
-        language="text"
-    )
-
-    st.markdown("### Limitations")
-
-    st.markdown(
-        """
-        - The model predicts **relative risk**, not absolute personal accident probability.
-        - Bicycle traffic volume is not included yet.
-        - Negative samples are estimated from road segments without observed accidents.
-        - Weather and real-time traffic are not included in the first version.
-        - The app is for educational and research purposes, not official route safety advice.
-        """
-    )
-
-
-# ============================================================
-# 7. Footer
-# ============================================================
-
-st.markdown("---")
-st.caption(
-    "2W1C Project | Berlin Bicycle Safety Routing | "
-    "Unfallatlas + OpenStreetMap + Machine Learning"
-)
