@@ -8,7 +8,7 @@ data/processed/*
 !data/processed/berlin_bike_2018_2025.csv
 outputs/*
 cache/*
-__pycache__/*
+__pycache__/
 
 # Generated outputs
 reports/*.html

@@ -87,7 +87,22 @@ destination_address = st.sidebar.text_input(
 )
 
 month = st.sidebar.slider("Month", min_value=1, max_value=12, value=7)
-hour = st.sidebar.slider("Travel hour", min_value=0, max_value=23, value=8)
+hour = st.sidebar.slider(
+    "Travel hour",
+    min_value=0,
+    max_value=23,
+    value=8,
+    help=(
+        "Currently this does not visibly change the route. "
+        "The current model found that segment risk ranking is almost invariant "
+        "across time windows. The slider is retained for a planned time-varying "
+        "severity-weighting extension."
+    ),
+)
+st.sidebar.caption(
+    "Note: in the current version, route choice is mainly spatial. "
+    "The hour slider is kept for transparency and future severity-based modelling."
+)
 
 weekday_map = {
     "Sunday": 1,
