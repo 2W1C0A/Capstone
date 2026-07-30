@@ -12,3 +12,7 @@ reports/*.html
 
 .DS_Store
 .venv/
+
+cache/
+outputs/
+*.graphml
