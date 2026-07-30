@@ -1,0 +1,16 @@
+[project]
+name = "berlin-bike-safety"
+version = "0.1.0"
+description = "Exposure-aware bicycle risk analysis and safe-route routing for Berlin"
+requires-python = ">=3.11"
+dependencies = [
+    "plotly>=6.8.0",
+    "scikit-learn>=1.9.0",
+    "seaborn>=0.13.2",
+]
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.3.0",
+    "nbformat>=5.10.4",
+]
