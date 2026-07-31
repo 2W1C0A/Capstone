@@ -1,0 +1,77 @@
+{
+  "n_train": 132718,
+  "n_test": 18866,
+  "positive_rate_train": 0.24968730692144245,
+  "positive_rate_test": 0.2521997243718859,
+  "roc_auc": 0.9732226761356845,
+  "pr_auc": 0.887876633498029,
+  "top10_recall": 0.3610760823875578,
+  "top20_recall": 0.6870533837746953,
+  "classification_report": {
+    "0": {
+      "precision": 1.0,
+      "recall": 0.9210377091012192,
+      "f1-score": 0.9588960224337687,
+      "support": 14108.0
+    },
+    "1": {
+      "precision": 0.8102861035422343,
+      "recall": 1.0,
+      "f1-score": 0.8952022577610537,
+      "support": 4758.0
+    },
+    "accuracy": 0.9409519771016643,
+    "macro avg": {
+      "precision": 0.9051430517711172,
+      "recall": 0.9605188545506096,
+      "f1-score": 0.9270491400974112,
+      "support": 18866.0
+    },
+    "weighted avg": {
+      "precision": 0.9521542076038348,
+      "recall": 0.9409519771016643,
+      "f1-score": 0.9428324725391022,
+      "support": 18866.0
+    }
+  },
+  "features": [
+    "month",
+    "hour",
+    "day_of_week",
+    "is_weekend",
+    "is_rush_hour",
+    "is_night",
+    "edge_length_m",
+    "has_cycleway",
+    "maxspeed_num",
+    "accident_count",
+    "severity_sum",
+    "serious_fatal_count",
+    "historical_risk_norm",
+    "node_risk_raw",
+    "combined_spatial_risk",
+    "season",
+    "highway_simple"
+  ],
+  "numeric_features": [
+    "month",
+    "hour",
+    "day_of_week",
+    "is_weekend",
+    "is_rush_hour",
+    "is_night",
+    "edge_length_m",
+    "has_cycleway",
+    "maxspeed_num",
+    "accident_count",
+    "severity_sum",
+    "serious_fatal_count",
+    "historical_risk_norm",
+    "node_risk_raw",
+    "combined_spatial_risk"
+  ],
+  "categorical_features": [
+    "season",
+    "highway_simple"
+  ]
+}
