@@ -4,84 +4,98 @@ import argparse
 
 from src.config import (
     CLEAN_ACCIDENT_FILE,
-    DEMO_ROUTE_MAP,
+    DEMO_ROUTE_MAP_FILE,
+    ensure_dirs,
 )
-from src.data_pipeline import prepare_clean_accidents
-from src.osm_network import load_or_download_graph, build_edge_features
-from src.spatial_risk import build_spatial_risk_pipeline
-from src.model_training import (
-    build_ml_dataset,
-    train_risk_model,
-    make_edge_prediction_table,
-)
+from src.data_pipeline import prepare_berlin_bicycle_accidents
+from src.model_training import build_ml_dataset, train_occurrence_models
+from src.osm_network import build_edge_features, load_or_download_graph
 from src.route_engine import RouteEngine
-
-
-def parse_args():
-    parser = argparse.ArgumentParser(description="Run 2W1C integrated end-to-end pipeline.")
-    parser.add_argument("--accident-file", type=str, default=None, help="Path to raw Unfallatlas CSV file.")
-    parser.add_argument("--use-clean-data", action="store_true", help="Use data/processed/berlin_bike_accidents_clean.csv.")
-    parser.add_argument("--force-download-osm", action="store_true", help="Force download Berlin OSM graph.")
-    parser.add_argument("--neg-ratio", type=int, default=3, help="Pseudo-negative samples per positive accident.")
-    parser.add_argument("--month", type=int, default=7)
-    parser.add_argument("--hour", type=int, default=8)
-    parser.add_argument("--day-of-week", type=int, default=3, help="1=Sunday, 2=Monday, ..., 7=Saturday in Unfallatlas convention.")
-    parser.add_argument("--start", type=str, default="Alexanderplatz, Berlin, Germany")
-    parser.add_argument("--destination", type=str, default="Brandenburg Gate, Berlin, Germany")
-    return parser.parse_args()
+from src.severity_model import build_severity_dataset, export_severity_tables, train_severity_models
+from src.spatial_risk import build_spatial_risk_pipeline, temporal_validation
+from src.visualization import make_risk_street_map
 
 
 def main():
-    args = parse_args()
+    parser = argparse.ArgumentParser(description="Run the 2W1C defensible pipeline.")
+    parser.add_argument("--raw-file", default=None, help="Optional single raw Unfallatlas file.")
+    parser.add_argument(
+        "--use-existing-clean",
+        action="store_true",
+        help="Use data/processed/berlin_bike_2018_2025.csv if it exists.",
+    )
+    parser.add_argument(
+        "--skip-osm-download",
+        action="store_true",
+        help="Require existing OSM graph files instead of downloading.",
+    )
+    parser.add_argument(
+        "--skip-temporal-validation",
+        action="store_true",
+        help="Skip forward validation of historical GIS risk.",
+    )
+    parser.add_argument(
+        "--demo-route",
+        action="store_true",
+        help="Generate a demo route map after training.",
+    )
+    args = parser.parse_args()
 
-    print("\n[1/7] Loading and cleaning accident data")
-    accidents = prepare_clean_accidents(
-        accident_file=args.accident_file,
-        use_clean_data=args.use_clean_data,
+    ensure_dirs()
+
+    use_existing = args.use_existing_clean or CLEAN_ACCIDENT_FILE.exists()
+    print("Step 1/8 — Prepare Berlin bicycle accident data")
+    accidents = prepare_berlin_bicycle_accidents(
+        raw_file=args.raw_file,
+        use_existing_clean=use_existing,
     )
 
-    print("\n[2/7] Loading/downloading OSM bicycle network")
-    G, G_proj = load_or_download_graph(force_download=args.force_download_osm)
-    edge_features = build_edge_features(G_proj)
+    print("\nStep 2/8 — Load/download OSM bicycle graph")
+    G, Gp = load_or_download_graph()
 
-    print("\n[3/7] Building spatial GIS risk")
-    snapped, edge_risk = build_spatial_risk_pipeline(G_proj, accidents)
+    print("\nStep 3/8 — Build OSM edge features")
+    edge_features = build_edge_features(Gp)
 
-    print("\n[4/7] Building ML dataset with positive and pseudo-negative samples")
-    ml_data = build_ml_dataset(
-        accidents=accidents,
-        snapped=snapped,
-        edge_risk=edge_risk,
-        neg_ratio=args.neg_ratio,
+    print("\nStep 4/8 — Build improved historical GIS risk baseline")
+    snapped, node_risk, route_risk = build_spatial_risk_pipeline(
+        Gp,
+        accidents,
+        edge_features=edge_features,
     )
 
-    print("\n[5/7] Training ML accident-risk model")
-    model, metrics = train_risk_model(ml_data)
+    print("\nStep 5/8 — Forward temporal validation of historical risk")
+    if not args.skip_temporal_validation:
+        temporal_validation(Gp, accidents, edge_features)
+    else:
+        print("skipped")
 
-    print("\n[6/7] Predicting edge-level ML risk")
-    make_edge_prediction_table(
-        edge_risk=edge_risk,
-        model=model,
-        month=args.month,
-        hour=args.hour,
-        day_of_week=args.day_of_week,
-    )
+    print("\nStep 6/8 — Build leakage-safe ML dataset and train occurrence models")
+    ml_data = build_ml_dataset(snapped, route_risk, restrict_to_rideable=True)
+    train_occurrence_models(ml_data)
 
-    print("\n[7/7] Creating demo route comparison")
-    engine = RouteEngine()
-    result, route_map = engine.compare_and_map(
-        start_address=args.start,
-        destination_address=args.destination,
-        month=args.month,
-        hour=args.hour,
-        day_of_week=args.day_of_week,
-        safety_preference=7,
-    )
-    route_map.save(DEMO_ROUTE_MAP)
+    print("\nStep 7/8 — Train/evaluate severity evidence model")
+    severity_data = build_severity_dataset(snapped, edge_features)
+    train_severity_models(severity_data)
+    export_severity_tables(severity_data)
 
-    print(result["recommendation_text"])
-    print(f"\nSaved demo map: {DEMO_ROUTE_MAP}")
-    print("\nPipeline complete.")
+    print("\nStep 8/8 — Generate historical risk street map")
+    make_risk_street_map(Gp, route_risk)
+
+    if args.demo_route:
+        print("\nGenerating demo route map")
+        engine = RouteEngine()
+        result, m = engine.compare_and_map(
+            start_address="Alexanderplatz, Berlin, Germany",
+            destination_address="Brandenburg Gate, Berlin, Germany",
+            safety_preference=7,
+            hour=8,
+        )
+        DEMO_ROUTE_MAP_FILE.parent.mkdir(parents=True, exist_ok=True)
+        m.save(DEMO_ROUTE_MAP_FILE)
+        print(result["recommendation_text"])
+        print(f"saved {DEMO_ROUTE_MAP_FILE}")
+
+    print("\nDone. Start the app with: streamlit run app.py")
 
 
 if __name__ == "__main__":

@@ -1,16 +1,22 @@
 [project]
-name = "berlin-bike-safety"
-version = "0.1.0"
-description = "Exposure-aware bicycle risk analysis and safe-route routing for Berlin"
-requires-python = ">=3.11"
+name = "2w1c-defensible-project"
+version = "0.2.0"
+description = "Defensible bicycle safety routing for Berlin with GIS baseline, leakage-safe ML, and severity evidence."
+requires-python = ">=3.10"
 dependencies = [
-    "plotly>=6.8.0",
-    "scikit-learn>=1.9.0",
-    "seaborn>=0.13.2",
+    "pandas>=2.0",
+    "numpy>=1.24",
+    "scikit-learn>=1.4",
+    "joblib>=1.3",
+    "osmnx>=1.9",
+    "geopandas>=0.14",
+    "shapely>=2.0",
+    "networkx>=3.0",
+    "folium>=0.15",
+    "streamlit>=1.32",
+    "streamlit-folium>=0.20",
+    "matplotlib>=3.7",
 ]
 
-[dependency-groups]
-dev = [
-    "ipykernel>=7.3.0",
-    "nbformat>=5.10.4",
-]
+[tool.ruff]
+line-length = 100

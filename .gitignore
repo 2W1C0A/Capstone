@@ -9,9 +9,17 @@ data/processed/*
 outputs/*
 cache/*
 __pycache__/
+reports/
+models/*
 
 # Generated outputs
 reports/*.html
 
 .DS_Store
 .venv/
+
+# Keep folders
+!models/.gitkeep
+!outputs/maps/.gitkeep
+!outputs/figures/.gitkeep
+!reports/.gitkeep
