@@ -26,3 +26,6 @@ reports/*.html
 cache/
 **/cache/
 *.graphml
+
+Untitled*.ipynb
+.ipynb_checkpoints/
