@@ -23,3 +23,9 @@ reports/*.html
 !outputs/maps/.gitkeep
 !outputs/figures/.gitkeep
 !reports/.gitkeep
+cache/
+**/cache/
+*.graphml
+
+Untitled*.ipynb
+.ipynb_checkpoints/
