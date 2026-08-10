@@ -89,7 +89,7 @@ data/processed/berlin_bike_2018_2025.csv
 The pipeline automatically uses the processed file if it exists.
 
 ## Run
-
+**Important:** Run the full pipeline before launching the app; the ML road-risk route only works after the model and processed risk files have been generated.
 ```bash
 python -m venv .venv
 # Windows
