@@ -61,16 +61,11 @@ import numpy as np
 import pandas as pd
 
 from .config import (
-    MODEL_DIR,
+    FREQUENCY_METRICS_FILE,
+    FREQUENCY_MODEL_FILE,
     OSM_EDGE_FEATURES_FILE,
     SNAPPED_ACCIDENTS_FILE,
 )
-
-
-# These two belong in config.py alongside the other model paths. Kept here until
-# that edit lands so this module does not block on it.
-FREQUENCY_MODEL_FILE = MODEL_DIR / "frequency_nb_model.joblib"
-FREQUENCY_METRICS_FILE = MODEL_DIR / "frequency_model_metrics.json"
 
 REFERENCE_CLASS = "cycleway"
 WINDOW_YEARS = 8

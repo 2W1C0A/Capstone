@@ -8,6 +8,7 @@ from src.config import (
     ensure_dirs,
 )
 from src.data_pipeline import prepare_berlin_bicycle_accidents
+from src.frequency_model import build_and_fit
 from src.model_training import build_ml_dataset, train_occurrence_models
 from src.osm_network import build_edge_features, load_or_download_graph
 from src.route_engine import RouteEngine
@@ -44,41 +45,49 @@ def main():
     ensure_dirs()
 
     use_existing = args.use_existing_clean or CLEAN_ACCIDENT_FILE.exists()
-    print("Step 1/8 — Prepare Berlin bicycle accident data")
+    print("Step 1/9 — Prepare Berlin bicycle accident data")
     accidents = prepare_berlin_bicycle_accidents(
         raw_file=args.raw_file,
         use_existing_clean=use_existing,
     )
 
-    print("\nStep 2/8 — Load/download OSM bicycle graph")
+    print("\nStep 2/9 — Load/download OSM bicycle graph")
     G, Gp = load_or_download_graph()
 
-    print("\nStep 3/8 — Build OSM edge features")
+    print("\nStep 3/9 — Build OSM edge features")
     edge_features = build_edge_features(Gp)
 
-    print("\nStep 4/8 — Build improved historical GIS risk baseline")
+    print("\nStep 4/9 — Build improved historical GIS risk baseline")
     snapped, node_risk, route_risk = build_spatial_risk_pipeline(
         Gp,
         accidents,
         edge_features=edge_features,
     )
 
-    print("\nStep 5/8 — Forward temporal validation of historical risk")
+    print("\nStep 5/9 — Forward temporal validation of historical risk")
     if not args.skip_temporal_validation:
         temporal_validation(Gp, accidents, edge_features)
     else:
         print("skipped")
 
-    print("\nStep 6/8 — Build leakage-safe ML dataset and train occurrence models")
+    print("\nStep 6/9 — Build leakage-safe ML dataset and train occurrence models")
     ml_data = build_ml_dataset(snapped, route_risk, restrict_to_rideable=True)
     train_occurrence_models(ml_data)
 
-    print("\nStep 7/8 — Train/evaluate severity evidence model")
+    print("\nStep 7/9 — Fit segment-level crash frequency model (NB SPF)")
+    # Negative-binomial rate model (crashes per metre) over undirected segments.
+    # Reads the edge features from Step 3 and the snapped accidents from Step 4,
+    # both already written to data/processed by this point. Persists the model
+    # bundle and metrics to models/. Evidence/training only — the routing engine
+    # and app are unchanged.
+    build_and_fit(Gp)
+
+    print("\nStep 8/9 — Train/evaluate severity evidence model")
     severity_data = build_severity_dataset(snapped, edge_features)
     train_severity_models(severity_data)
     export_severity_tables(severity_data)
 
-    print("\nStep 8/8 — Generate historical risk street map")
+    print("\nStep 9/9 — Generate historical risk street map")
     make_risk_street_map(Gp, route_risk)
 
     if args.demo_route:

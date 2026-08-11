@@ -37,6 +37,10 @@ OCCURRENCE_METRICS_FILE = MODEL_DIR / "occurrence_model_metrics.json"
 OCCURRENCE_COMPARISON_FILE = MODEL_DIR / "occurrence_model_comparison.csv"
 LEAKAGE_DIAGNOSTICS_FILE = MODEL_DIR / "leakage_diagnostics.json"
 
+# Segment-level crash frequency model (negative binomial SPF); see frequency_model.py.
+FREQUENCY_MODEL_FILE = MODEL_DIR / "frequency_nb_model.joblib"
+FREQUENCY_METRICS_FILE = MODEL_DIR / "frequency_model_metrics.json"
+
 SEVERITY_MODEL_FILE = MODEL_DIR / "severity_logistic_model.joblib"
 SEVERITY_METRICS_FILE = MODEL_DIR / "severity_model_metrics.json"
 SEVERITY_BY_HOUR_FILE = PROCESSED_DIR / "severity_by_hour.csv"

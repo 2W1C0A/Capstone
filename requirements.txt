@@ -11,3 +11,4 @@ streamlit>=1.30
 streamlit-folium>=0.18
 matplotlib>=3.7
 seaborn>=0.12
+statsmodels>=0.14.6
