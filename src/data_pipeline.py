@@ -31,10 +31,13 @@ COLUMN_MAP = {
 
 
 LIGHT_LABELS = {
+    # ULICHTVERH (Lichtverhältnisse) in the Unfallatlas has only three valid
+    # codes (0/1/2) and carries no lit/unlit distinction. Code 2 is darkness,
+    # full stop. Verified against the official Unfallatlas codebook (DSB) in
+    # notebook 01_eda_and_analysis cell [11].
     0: "daylight",
     1: "twilight",
-    2: "dark_lit",
-    3: "dark_unlit_old_code_check",
+    2: "darkness",
 }
 
 SURFACE_LABELS = {
@@ -42,6 +45,26 @@ SURFACE_LABELS = {
     1: "wet_or_slippery",
     2: "wintery",
 }
+
+# Any of these substrings appearing in light_label means a stale mapping leaked
+# in (old "dark_lit" for code 2, or the nonexistent "dark_unlit" code 3). Use a
+# substring test, not exact set membership: the previous guard checked for
+# "dark_unlit" exactly, so the stale "dark_unlit_old_code_check" label walked
+# straight past it.
+_BAD_LIGHT_LABELS = ("dark_lit", "dark_unlit")
+
+
+def _assert_light_labels(labels) -> None:
+    bad = {
+        s
+        for s in set(map(str, labels))
+        if any(b in s for b in _BAD_LIGHT_LABELS)
+    }
+    assert not bad, (
+        f"Stale light labels {sorted(bad)}. ULICHTVERH has only codes 0/1/2 "
+        "and carries no lit/unlit distinction. "
+        "Regenerate berlin_bike_2018_2025.csv."
+    )
 
 
 def get_season(month: int) -> str:
@@ -124,9 +147,7 @@ def prepare_berlin_bicycle_accidents(
         df = pd.read_csv(output_file)
         # Canary for the corrected light mapping.
         if "light_label" in df.columns:
-            assert "dark_unlit" not in set(df["light_label"].astype(str)), (
-                "Stale light labels detected. Regenerate berlin_bike_2018_2025.csv."
-            )
+            _assert_light_labels(df["light_label"])
         return df
 
     if raw_file is not None:
@@ -224,9 +245,7 @@ def prepare_berlin_bicycle_accidents(
     out = out[keep].reset_index(drop=True)
 
     # Canary copied from the improved notebook.
-    assert "dark_unlit" not in set(out.get("light_label", pd.Series(dtype=str)).astype(str)), (
-        "Stale light labels detected. Regenerate berlin_bike_2018_2025.csv."
-    )
+    _assert_light_labels(out.get("light_label", pd.Series(dtype=str)))
 
     output_file.parent.mkdir(parents=True, exist_ok=True)
     out.to_csv(output_file, index=False)
