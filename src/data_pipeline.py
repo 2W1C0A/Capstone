@@ -123,8 +123,19 @@ def read_raw_unfallatlas(raw_dir: str | Path = RAW_DIR) -> pd.DataFrame:
 def _ensure_numeric(df: pd.DataFrame, cols: Iterable[str]) -> pd.DataFrame:
     out = df.copy()
     for col in cols:
-        if col in out.columns:
-            out[col] = pd.to_numeric(out[col], errors="coerce")
+        if col not in out.columns:
+            continue
+        # Unfallatlas ships German decimal commas: "53,729614888" rather than
+        # "53.729614888". pd.to_numeric turns those into NaN, and the dropna on
+        # latitude/longitude below then removes every row — silently, with no
+        # error. Notebook 01 cell [9] does this conversion; src/ did not.
+        # Note the dtype test: on pandas builds with the new string dtype these
+        # columns arrive as "str" rather than "object", so a `== object` check
+        # skips the conversion silently and every coordinate becomes NaN.
+        s = out[col]
+        if not pd.api.types.is_numeric_dtype(s):
+            s = s.astype(str).str.replace(",", ".", regex=False).replace({"nan": None})
+        out[col] = pd.to_numeric(s, errors="coerce")
     return out
 
 
@@ -246,6 +257,13 @@ def prepare_berlin_bicycle_accidents(
 
     # Canary copied from the improved notebook.
     _assert_light_labels(out.get("light_label", pd.Series(dtype=str)))
+
+    if len(out) < 30_000:
+        raise ValueError(
+            f"Only {len(out):,} Berlin bicycle rows survived filtering; expected "
+            "about 37,900. Check the decimal-comma conversion in _ensure_numeric "
+            "and that ULAND and IstRad are present in every release."
+        )
 
     output_file.parent.mkdir(parents=True, exist_ok=True)
     out.to_csv(output_file, index=False)
