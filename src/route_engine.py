@@ -625,7 +625,7 @@ class RouteEngine:
             <div style="font-weight: 600; margin-bottom: 6px; color: #1a1a1a;">Route legend</div>
             <div style="color: #1a1a1a;"><span style="color:#d64545;">&#9632;</span>&nbsp; Fastest route</div>
             <div style="color: #1a1a1a;"><span style="color:#1F4E8C;">&#9632;</span>&nbsp; Historical GIS-risk route</div>
-            <div style="color: #1a1a1a;"><span style="color:#12A55F;">&#9632;</span>&nbsp; SPF frequency-risk route</div>
+            <div style="color: #1a1a1a;"><span style="color:#12A55F;">&#9632;</span>&nbsp; ML road-risk route</div>
         </div>
         """
         m.get_root().html.add_child(folium.Element(legend))
