@@ -190,6 +190,36 @@ h1,h2,h3,h4{
   font-family:'JetBrains Mono',monospace; font-size:.73rem; color:var(--muted);
   margin:0 0 10px;
 }
+div[data-testid="stMetric"]{
+  background:#ffffff !important;
+  border:1px solid #e0e0e0 !important;
+  border-radius:10px; padding:14px 16px;
+}
+div[data-testid="stMetric"] label,
+div[data-testid="stMetricLabel"],
+div[data-testid="stMetricLabel"] p{
+  color:#5a5a5a !important;
+}
+div[data-testid="stMetricValue"],
+div[data-testid="stMetricValue"] div{
+  color:#111111 !important;
+}
+div[data-testid="stMetricDelta"],
+div[data-testid="stMetricDelta"] div{
+  color:#5a5a5a !important;
+}
+button[data-baseweb="tab"],
+button[data-baseweb="tab"] *{
+  color:#3a3a3a !important; font-weight:500 !important; font-size:.9rem !important;
+}
+button[data-baseweb="tab"][aria-selected="true"],
+button[data-baseweb="tab"][aria-selected="true"] *{
+  color:#000000 !important; font-weight:600 !important;
+}
+div[data-testid="stButton"] button,
+div[data-testid="stButton"] button *{
+  color:#ffffff !important;
+}
 
 /* ---- sidebar ------------------------------------------------------------ */
 section[data-testid="stSidebar"]{
