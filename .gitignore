@@ -28,4 +28,4 @@ cache/
 *.graphml
 
 Untitled*.ipynb
-.ipynb_checkpoints/
+.ipynb_checkpoints/*.graphml.pkl

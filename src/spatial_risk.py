@@ -275,8 +275,14 @@ def build_edge_risk(
     edge_features: pd.DataFrame | None = None,
     shrinkage: float = 5.0,
     output_file: str | Path = EDGE_RISK_FILE,
+    write: bool = True,
 ) -> pd.DataFrame:
-    """Build undirected segment historical GIS risk with empirical-Bayes shrinkage."""
+    """Build undirected segment historical GIS risk with empirical-Bayes shrinkage.
+
+    `write=False` skips persisting the CSV; use it for the shrinkage-robustness
+    loop (nb 02 [14]) so repeated calls do not overwrite the deployed m=5 file
+    with a later variant.
+    """
     edge_accidents = ensure_accident_outcome_columns(edge_accidents)
     edges = _load_edge_features(edge_features)
 
@@ -337,10 +343,20 @@ def build_edge_risk(
         risk["severity_sum"] + shrinkage * risk["class_prior"] * risk["len100"]
     ) / (risk["len100"] + shrinkage)
 
-    cap = risk["historical_risk"].quantile(0.95)
+    # Normalise on a log scale with a high (p99.9) cap. A linear p95 cap
+    # saturates catastrophically here: ~91% of segments have zero crashes, so
+    # p95 lands just above zero and a single serious injury (severity_weight 23)
+    # or fatality (222) blows past it, clipping ~17k segments to exactly 1.0.
+    # The router then cannot tell a lone minor injury from a fatal cluster, and
+    # the historical score collapses to a binary "had a crash" flag — which the
+    # forward validation shows is *beaten* by the naive past-crash baseline.
+    # log1p + p99.9 keeps the BASt severity weighting (1:23:222) and the
+    # empirical-Bayes shrinkage as a graded signal. See docs finding #7.
+    log_risk = np.log1p(risk["historical_risk"].clip(lower=0.0))
+    cap = log_risk.quantile(0.999)
     if not np.isfinite(cap) or cap <= 0:
-        cap = risk["historical_risk"].max()
-    risk["historical_risk_norm"] = (risk["historical_risk"] / cap).clip(0, 1) if cap > 0 else 0.0
+        cap = log_risk.max()
+    risk["historical_risk_norm"] = (log_risk / cap).clip(0, 1) if cap > 0 else 0.0
 
     # Merge risk back to directed edges for routing.
     edge_risk = edges.merge(
@@ -365,10 +381,13 @@ def build_edge_risk(
     for col in ["accident_count", "severity_sum", "serious_fatal_count", "fatal_count", "historical_risk_norm"]:
         edge_risk[col] = pd.to_numeric(edge_risk[col], errors="coerce").fillna(0.0)
 
-    output_file = Path(output_file)
-    output_file.parent.mkdir(parents=True, exist_ok=True)
-    edge_risk.to_csv(output_file, index=False)
-    print(f"saved edge risk: {output_file} | {len(edge_risk):,} directed edges")
+    if write:
+        output_file = Path(output_file)
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        edge_risk.to_csv(output_file, index=False)
+        print(f"saved edge risk: {output_file} | {len(edge_risk):,} directed edges")
+    else:
+        print(f"built edge risk (not written) | {len(edge_risk):,} directed edges")
     return edge_risk
 
 
@@ -483,22 +502,61 @@ def temporal_validation(
     )
 
     seg = edge_risk.drop_duplicates("pair_id").copy()
-    threshold = seg["historical_risk_norm"].quantile(0.90)
-    top_pairs = set(seg.loc[seg["historical_risk_norm"] >= threshold, "pair_id"].astype(str))
+    seg["pair_id"] = seg["pair_id"].astype(str)
+    seg["edge_length_m"] = pd.to_numeric(seg["edge_length_m"], errors="coerce").fillna(0.0)
+    test_pairs = test_snap["pair_id"].astype(str)
+    total_len = float(seg["edge_length_m"].sum())
 
-    hit = test_snap["pair_id"].astype(str).isin(top_pairs).mean()
+    # True top decile by segment COUNT (not `>= quantile(0.90)`, which with many
+    # tied low scores selects far more than 10% of segments).
+    n_top = max(1, int(round(len(seg) * 0.10)))
+    by_risk = seg.sort_values("historical_risk_norm", ascending=False)
+    top_pairs = set(by_risk.head(n_top)["pair_id"])
+    hit = float(test_pairs.isin(top_pairs).mean())
+    top_len_share = (
+        float(by_risk.head(n_top)["edge_length_m"].sum() / total_len) if total_len > 0 else None
+    )
+
+    # Baseline 1 — length. Crashes concentrate on long arterials, so "just rank
+    # by segment length" is the baseline a reviewer will demand. Same decile budget.
+    by_len = seg.sort_values("edge_length_m", ascending=False)
+    length_pairs = set(by_len.head(n_top)["pair_id"])
+    length_recall = float(test_pairs.isin(length_pairs).mean())
+
+    # Baseline 2 — memory. "This segment had >=1 crash in the training window."
+    # This is the strongest naive baseline and the honest bar to clear.
+    memory_pairs = set(train_snap["pair_id"].astype(str))
+    memory_recall = float(test_pairs.isin(memory_pairs).mean())
+
     result = {
         "train_years": f"<= {train_end_year}",
         "test_years": f">= {test_start_year}",
         "n_train_crashes": int(len(train_snap)),
         "n_test_crashes": int(len(test_snap)),
-        "top_decile_recall": float(hit),
+        "n_segments": int(len(seg)),
+        "top_decile_recall": hit,
+        "top_decile_network_length_share": top_len_share,
         "random_expectation": 0.10,
+        "length_baseline_recall": length_recall,
+        "memory_baseline_recall": memory_recall,
+        "memory_baseline_segments": int(len(memory_pairs)),
         "lift_over_random": float(hit / 0.10) if np.isfinite(hit) else None,
+        "lift_over_length": float(hit / length_recall) if length_recall > 0 else None,
+        "lift_over_memory": float(hit / memory_recall) if memory_recall > 0 else None,
+        "note": (
+            "lift_over_random uses a 10% strawman. The defensible bars are "
+            "lift_over_length and lift_over_memory; a value <= 1.0 there means the "
+            "risk ranking does not beat that baseline. Memory is blind to crashes on "
+            "never-before-crashed segments, which is where a structural model must win."
+        ),
     }
 
     output_file = Path(output_file)
     output_file.parent.mkdir(parents=True, exist_ok=True)
     output_file.write_text(json.dumps(result, indent=2), encoding="utf-8")
-    print(f"temporal validation: {hit:.1%} of future crashes in top decile; lift {hit/0.10:.2f}×")
+    print(
+        f"temporal validation: top decile recall {hit:.1%} "
+        f"(random {hit/0.10:.2f}×, length {hit/length_recall:.2f}×, "
+        f"memory {hit/memory_recall:.2f}×)"
+    )
     return result

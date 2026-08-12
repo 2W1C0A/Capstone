@@ -67,6 +67,7 @@ from .config import (
     SNAPPED_ACCIDENTS_FILE,
 )
 
+
 REFERENCE_CLASS = "cycleway"
 WINDOW_YEARS = 8
 
@@ -633,6 +634,35 @@ def predict_edge_expected_crashes(
 
     out["expected_crashes"] = length * np.exp(linpred)
     return out
+
+
+def score_edges(
+    edge_features: pd.DataFrame,
+    graph,
+    model_bundle: dict | str | Path = FREQUENCY_MODEL_FILE,
+    cap_quantile: float = 0.95,
+    strict: bool = False,
+) -> pd.DataFrame:
+    """Attach `expected_crashes` and a 0-1 `spf_risk_norm` to every edge.
+
+    This is exactly what the router consumes. Derives `junction_ends` from the
+    graph topology, predicts expected crashes, and normalises them to [0, 1] by
+    their `cap_quantile` so they flow through the same length-scaled cost as the
+    historical route. Run it once in the pipeline and persist the two columns
+    into the route-risk CSV; the app then reads `spf_risk_norm` directly instead
+    of scoring the whole ~441k-edge network on the first request.
+    """
+    scored = add_junction_features(edge_features, graph)
+    scored = predict_edge_expected_crashes(scored, model_bundle, strict=strict)
+
+    expected = pd.to_numeric(scored["expected_crashes"], errors="coerce").fillna(0.0)
+    cap = expected.quantile(cap_quantile)
+    if not np.isfinite(cap) or cap <= 0:
+        cap = expected.max()
+    scored["spf_risk_norm"] = (
+        (expected / cap).clip(0, 1) if cap and cap > 0 else 0.0
+    )
+    return scored
 
 
 def rate_ratio_summary(

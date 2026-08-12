@@ -33,13 +33,13 @@ def route_summary_table(result: dict) -> pd.DataFrame:
             "risk_reduction_pct": result.get("historical_risk_reduction_pct"),
         })
 
-    if result.get("ml_summary"):
+    if result.get("spf_summary"):
         rows.append({
-            "route": "ML road-risk",
-            "distance_km": result["ml_summary"]["distance_km"],
-            "risk_model": "leakage-safe road-only ML",
-            "risk_score": result["ml_summary"]["length_weighted_risk"],
-            "risk_reduction_pct": result.get("ml_risk_reduction_pct"),
+            "route": "SPF frequency-risk",
+            "distance_km": result["spf_summary"]["distance_km"],
+            "risk_model": "negative-binomial crash-frequency SPF",
+            "risk_score": result["spf_summary"]["length_weighted_risk"],
+            "risk_reduction_pct": result.get("spf_risk_reduction_pct"),
         })
 
     return pd.DataFrame(rows)

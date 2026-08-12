@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pickle
 import re
 from pathlib import Path
 from typing import Any
@@ -101,6 +102,36 @@ def pair_id(u, v) -> str:
     return f"{a}|{b}"
 
 
+def load_graph_fast(graph_file: str | Path):
+    """Load a saved OSM graph, preferring a pickle cache next to the GraphML.
+
+    Parsing the 441k-edge Berlin GraphML with `ox.load_graphml` takes ~60 s
+    because every attribute is re-typed from text. A pickle of the same
+    networkx object loads in a few seconds. The pickle (`<file>.graphml.pkl`) is
+    (re)built whenever it is missing or older than the GraphML, so GraphML stays
+    the canonical, version-portable format and the pickle is a disposable cache.
+    Delete the .pkl to force a rebuild.
+    """
+    graph_file = Path(graph_file)
+    pkl = graph_file.with_suffix(graph_file.suffix + ".pkl")
+
+    if pkl.exists() and pkl.stat().st_mtime >= graph_file.stat().st_mtime:
+        try:
+            with open(pkl, "rb") as fh:
+                return pickle.load(fh)
+        except Exception as exc:  # noqa: BLE001 - a bad cache must never be fatal
+            print(f"graph pickle {pkl.name} unreadable ({exc}); rebuilding from GraphML")
+
+    G = ox.load_graphml(graph_file)
+    try:
+        with open(pkl, "wb") as fh:
+            pickle.dump(G, fh, protocol=pickle.HIGHEST_PROTOCOL)
+        print(f"cached graph pickle: {pkl.name}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"could not write graph pickle {pkl.name}: {exc}")
+    return G
+
+
 def load_or_download_graph(
     graph_file: str | Path = OSM_GRAPH_FILE,
     projected_graph_file: str | Path = OSM_PROJECTED_GRAPH_FILE,
@@ -111,7 +142,7 @@ def load_or_download_graph(
     graph_file.parent.mkdir(parents=True, exist_ok=True)
 
     if graph_file.exists():
-        G = ox.load_graphml(graph_file)
+        G = load_graph_fast(graph_file)
         print(f"loaded graph: {graph_file}")
     else:
         print(f"downloading OSM bicycle network for {BERLIN_PLACE} ...")
@@ -127,7 +158,7 @@ def load_or_download_graph(
         )
 
     if projected_graph_file.exists():
-        Gp = ox.load_graphml(projected_graph_file)
+        Gp = load_graph_fast(projected_graph_file)
         print(f"loaded projected graph: {projected_graph_file}")
     else:
         Gp = ox.project_graph(G, to_crs=BERLIN_CRS)

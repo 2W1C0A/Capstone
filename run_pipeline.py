@@ -5,10 +5,12 @@ import argparse
 from src.config import (
     CLEAN_ACCIDENT_FILE,
     DEMO_ROUTE_MAP_FILE,
+    ROUTE_RISK_FILE,
     ensure_dirs,
 )
 from src.data_pipeline import prepare_berlin_bicycle_accidents
-from src.frequency_model import build_and_fit
+from src.frequency_model import build_and_fit as build_and_fit_frequency_model
+from src.frequency_model import score_edges as score_edges_with_spf
 from src.model_training import build_ml_dataset, train_occurrence_models
 from src.osm_network import build_edge_features, load_or_download_graph
 from src.route_engine import RouteEngine
@@ -74,13 +76,14 @@ def main():
     ml_data = build_ml_dataset(snapped, route_risk, restrict_to_rideable=True)
     train_occurrence_models(ml_data)
 
-    print("\nStep 7/9 — Fit segment-level crash frequency model (NB SPF)")
-    # Negative-binomial rate model (crashes per metre) over undirected segments.
-    # Reads the edge features from Step 3 and the snapped accidents from Step 4,
-    # both already written to data/processed by this point. Persists the model
-    # bundle and metrics to models/. Evidence/training only — the routing engine
-    # and app are unchanged.
-    build_and_fit(Gp)
+    print("\nStep 7/9 — Fit negative-binomial SPF and score the network")
+    spf_bundle, _ = build_and_fit_frequency_model(Gp)
+    # Score every edge once here and persist spf_risk_norm into the route-risk
+    # CSV, so the app reads a column instead of scoring ~441k edges on its first
+    # request. junction_ends is derived from the graph inside score_edges.
+    route_risk = score_edges_with_spf(route_risk, Gp, spf_bundle)
+    route_risk.to_csv(ROUTE_RISK_FILE, index=False)
+    print(f"saved SPF-scored route risk: {ROUTE_RISK_FILE}")
 
     print("\nStep 8/9 — Train/evaluate severity evidence model")
     severity_data = build_severity_dataset(snapped, edge_features)
