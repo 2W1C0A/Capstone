@@ -272,7 +272,7 @@ st.markdown(THEME_CSS, unsafe_allow_html=True)
 ROUTE_STYLES = {
     "fastest": ("Fastest", "#2B3440"),
     "historical": ("Historical GIS risk", "#E8A317"),
-    "spf": ("SPF frequency risk", "#12A55F"),
+    "spf": ("ML road-risk", "#12A55F"),
 }
 
 SAFETY_WORDS = {
@@ -467,7 +467,7 @@ with st.sidebar:
         23,
         8,
         help=(
-            "The deployed route models (SPF crash-frequency and historical GIS risk) "
+            "The deployed route models (road-only ML occurrence and historical GIS risk) "
             "do not use hour, so it does not change the route. The ranking is mainly spatial."
         ),
     )
@@ -476,9 +476,9 @@ with st.sidebar:
         st.write(
             "Not in the current route models. The earlier leakage analysis showed that "
             "time-only accident occurrence features carry almost no signal under the current "
-            "negative-sampling design, and the deployed SPF frequency model is a per-segment "
-            "rate that does not vary by hour. Time is kept here for transparency and future "
-            "severity modelling."
+            "negative-sampling design, and the deployed road-only occurrence model uses road "
+            "features only and does not vary by hour. Time is kept here for transparency and "
+            "future severity modelling."
         )
 
     invalid_address = (
@@ -506,12 +506,12 @@ st.markdown(
       <div class="eyebrow">Berlin &middot; defensible GIS + ML route engine</div>
       <div class="hero-title">🚲 <span class="accent">2W1C</span>: Bicycle Safety Routing</div>
       <p class="lede">Compare the shortest route, a severity-weighted historical GIS-risk
-         route, and an SPF crash-frequency route. The app separates spatial
+         route, and an ML road-risk route. The app separates spatial
          risk, ML diagnostics, and severity evidence instead of hiding model limitations.</p>
       <div class="chips">
         <span class="chip"><span class="dot" style="background:{ROUTE_STYLES['fastest'][1]}"></span><b>Fastest</b> &middot; distance only</span>
         <span class="chip"><span class="dot" style="background:{ROUTE_STYLES['historical'][1]}"></span><b>Historical</b> &middot; GIS risk baseline</span>
-        <span class="chip"><span class="dot" style="background:{ROUTE_STYLES['spf'][1]}"></span><b>SPF</b> &middot; negative-binomial crash frequency</span>
+        <span class="chip"><span class="dot" style="background:{ROUTE_STYLES['spf'][1]}"></span><b>ML</b> &middot; leakage-safe road-only occurrence</span>
         <span class="chip"><span class="dot" style="background:{ROUTE_STYLES['spf'][1]}"></span><b>Severity</b> &middot; evidence, not a route guarantee</span>
       </div>
     </div>
@@ -641,13 +641,13 @@ with tab1:
 
         fastest_distance = result.get("fastest_distance_summary", result.get("fastest_summary", {}))
         fastest_hist = result.get("fastest_historical_summary", result.get("fastest_summary", {}))
-        fastest_spf = result.get("fastest_spf_summary", result.get("fastest_summary", {}))
+        fastest_ml = result.get("fastest_ml_summary", result.get("fastest_summary", {}))
         historical = result.get("historical_summary", {})
-        spf = result.get("spf_summary")
+        ml = result.get("ml_summary")
 
         ref_km = num(fastest_distance, "distance_km")
         hist_reduction = float(result.get("historical_risk_reduction_pct") or 0.0)
-        spf_reduction = float(result.get("spf_risk_reduction_pct") or 0.0) if spf else None
+        ml_reduction = float(result.get("ml_risk_reduction_pct") or 0.0) if ml else None
 
         cols = st.columns(3, gap="medium")
 
@@ -658,7 +658,7 @@ with tab1:
                 "distance only — the baseline",
                 [
                     ("historical risk", f"{num(fastest_hist, 'length_weighted_risk'):.4f}"),
-                    ("SPF risk", f"{num(fastest_spf, 'length_weighted_risk'):.4f}" if spf else "—"),
+                    ("ML risk", f"{num(fastest_ml, 'length_weighted_risk'):.4f}" if ml else "—"),
                     ("segments", f"{int(num(fastest_distance, 'n_segments')):d}"),
                 ],
             )
@@ -677,22 +677,22 @@ with tab1:
             )
 
         with cols[2]:
-            if spf:
+            if ml:
                 lane_card(
                     "spf",
-                    num(spf, "distance_km"),
-                    detour_caption(num(spf, "distance_km"), ref_km),
+                    num(ml, "distance_km"),
+                    detour_caption(num(ml, "distance_km"), ref_km),
                     [
-                        ("SPF risk", f"{num(spf, 'length_weighted_risk'):.4f}"),
-                        ("baseline", f"{num(fastest_spf, 'length_weighted_risk'):.4f}"),
-                        ("segments", f"{int(num(spf, 'n_segments')):d}"),
+                        ("ML risk", f"{num(ml, 'length_weighted_risk'):.4f}"),
+                        ("baseline", f"{num(fastest_ml, 'length_weighted_risk'):.4f}"),
+                        ("segments", f"{int(num(ml, 'n_segments')):d}"),
                     ],
-                    reduction_pct=spf_reduction,
+                    reduction_pct=ml_reduction,
                 )
             else:
                 st.markdown(
                     '<div class="lane" style="--c:#12A55F">'
-                    '<div class="tag">SPF frequency risk</div>'
+                    '<div class="tag">ML road-risk</div>'
                     '<div class="big">—<small>km</small></div>'
                     '<div class="delta">model file not loaded</div>'
                     '<div class="kv kv-first"><span>status</span><b>unavailable</b></div>'
@@ -701,7 +701,7 @@ with tab1:
                 )
 
         st.caption(
-            "Risk values are relative model scores. Historical GIS risk and SPF frequency-risk "
+            "Risk values are relative model scores. Historical GIS risk and ML road-risk "
             "are reported on their own scales and should not be interpreted as personal crash probabilities."
         )
 
@@ -714,7 +714,7 @@ with tab1:
                 f'<div class="legend">'
                 f'<span><span class="dot" style="background:{ROUTE_STYLES["fastest"][1]}"></span>Fastest</span>'
                 f'<span><span class="dot" style="background:{ROUTE_STYLES["historical"][1]}"></span>Historical GIS risk</span>'
-                f'<span><span class="dot" style="background:{ROUTE_STYLES["spf"][1]}"></span>SPF frequency risk</span>'
+                f'<span><span class="dot" style="background:{ROUTE_STYLES["spf"][1]}"></span>ML road-risk</span>'
                 f'</div>',
                 unsafe_allow_html=True,
             )
@@ -772,7 +772,7 @@ with tab2:
         'Road segment features → relative accident-occurrence risk. This occurrence classifier is '
         'a leakage diagnostic; the retained variant is road-only because the leakage analysis showed '
         'time-only occurrence features have no useful signal under the negative-sampling design. '
-        'The route itself is driven by the negative-binomial SPF crash-frequency model (Route tab).</div>',
+        'The route itself is driven by this road-only occurrence model (Route tab).</div>',
         unsafe_allow_html=True,
     )
 
@@ -887,8 +887,8 @@ with tab5:
     st.markdown(
         '<div class="panel"><b>Limitations</b><br>'
         'Unfallatlas has crashes but not bicycle exposure counts. Therefore the app reports '
-        'relative model scores, not personal crash probabilities. The SPF gives expected crashes '
-        'per metre, not per cyclist-kilometre, so a low-exposure class constraint is applied on top. '
+        'relative model scores, not personal crash probabilities. The occurrence model gives relative '
+        'crash probability per edge, not per cyclist-kilometre, so a low-exposure class constraint is applied on top. '
         'The hour slider is retained for transparency, but the route models are spatial and do not vary by hour.</div>',
         unsafe_allow_html=True,
     )

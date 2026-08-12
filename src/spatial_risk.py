@@ -463,6 +463,67 @@ def build_spatial_risk_pipeline(
     return snapped, node_risk, route_risk
 
 
+def _surface_topk_recall(score_by_pair, test_pairs, frac: float = 0.10) -> dict:
+    """Top-`frac` segments by score (by COUNT, matching the historical metric):
+    share of held-out crashes that land on them, plus lift over the random `frac`
+    baseline. `score_by_pair` is indexed by pair_id and defines the universe.
+    """
+    s = score_by_pair.dropna()
+    if s.empty:
+        return {"top_decile_recall": None, "lift_over_random": None}
+    n_top = max(1, int(round(len(s) * frac)))
+    top = set(s.sort_values(ascending=False).head(n_top).index.astype(str))
+    tp = test_pairs.astype(str)
+    recall = float(tp.isin(top).mean()) if len(tp) else None
+    lift = float(recall / frac) if recall is not None else None
+    return {"top_decile_recall": recall, "lift_over_random": lift}
+
+
+def _occurrence_surface_by_pair(train_snap, edge_risk, edge_features, output_file):
+    """Refit the leakage-safe road-only occurrence model on train-only crashes and
+    return its per-segment risk (max over the pair's directed edges)."""
+    from .model_training import (
+        ROAD_CATEGORICAL_FEATURES,
+        ROAD_NUMERIC_FEATURES,
+        _make_pipeline,
+        build_ml_dataset,
+        predict_edge_occurrence_risk,
+    )
+
+    ml = build_ml_dataset(
+        train_snap,
+        edge_risk,
+        output_file=Path(output_file).with_suffix(".ml_train.csv"),
+    )
+    numeric = [c for c in ROAD_NUMERIC_FEATURES if c in ml.columns]
+    categorical = [c for c in ROAD_CATEGORICAL_FEATURES if c in ml.columns]
+    cols = numeric + categorical
+    pipe = _make_pipeline(numeric, categorical)
+    pipe.fit(ml[cols], ml["accident_label"].astype(int))
+
+    scored = predict_edge_occurrence_risk(edge_features, {"model": pipe, "features": cols})
+    return scored.groupby(scored["pair_id"].astype(str))["ml_occurrence_risk"].max()
+
+
+def _frequency_surface_by_pair(train_snap, edge_features, Gp):
+    """Refit the negative-binomial SPF on train-only crash counts and return its
+    per-segment expected crash count (identical for both directions of a pair)."""
+    from .frequency_model import (
+        add_junction_features,
+        build_segment_table,
+        fit_frequency_model,
+        predict_edge_expected_crashes,
+    )
+
+    seg = build_segment_table(edges=edge_features, snapped=train_snap, verbose=False)
+    seg = add_junction_features(seg, Gp, edge_lookup=edge_features)
+    bundle, _ = fit_frequency_model(seg, save=False)
+
+    edges_j = add_junction_features(edge_features, Gp)
+    pred = predict_edge_expected_crashes(edges_j, bundle, strict=False)
+    return pred.groupby(pred["pair_id"].astype(str))["expected_crashes"].first()
+
+
 def temporal_validation(
     Gp,
     accidents: pd.DataFrame,
@@ -470,11 +531,26 @@ def temporal_validation(
     train_end_year: int = 2023,
     test_start_year: int = 2024,
     output_file: str | Path = TEMPORAL_VALIDATION_FILE,
+    compare_surfaces: bool = True,
 ) -> dict:
-    """Forward validation of historical risk ranking.
+    """Forward validation of the risk surfaces.
 
     Build risk from earlier years and measure how many future crashes land in the
     top decile of the past-risk ranking. Random expectation is 10%.
+
+    The historical metric and its length/memory baselines are unchanged. When
+    `compare_surfaces` is True, a `surfaces` list additionally scores four surfaces
+    on the SAME held-out crashes over a common segment universe with the same
+    top-decile-by-count rule, so they are directly comparable:
+
+        historical_gis  — severity-weighted empirical-Bayes spatial risk
+        occurrence_ml   — leakage-safe road-only occurrence model (refit on train)
+        frequency_nb    — negative-binomial SPF, expected crashes (refit on train)
+
+    Each is rebuilt from crashes up to `train_end_year` only and scored on crashes
+    from `test_start_year` on that it was not fit on. The occurrence and frequency
+    surfaces are best-effort: if either fails it is omitted from the list and the
+    historical validation still returns.
     """
     accidents = ensure_accident_outcome_columns(accidents)
     train = accidents[accidents["year"] <= train_end_year].copy()
@@ -551,6 +627,45 @@ def temporal_validation(
         ),
     }
 
+    if compare_surfaces:
+        # Same segment universe and the same top-decile-by-count rule as the
+        # historical metric above, so all four surfaces are apples-to-apples.
+        universe = pd.Index(seg["pair_id"].astype(str), name="pair_id")
+
+        def _score(name, by_pair):
+            s = by_pair.reindex(universe).astype(float).fillna(0.0)
+            row = {"surface": name}
+            row.update(_surface_topk_recall(s, test_pairs, frac=0.10))
+            return row
+
+        surfaces = [
+            _score(
+                "historical_gis",
+                seg.set_index(seg["pair_id"].astype(str))["historical_risk_norm"],
+            )
+        ]
+        try:
+            surfaces.append(
+                _score(
+                    "occurrence_ml",
+                    _occurrence_surface_by_pair(train_snap, edge_risk, edge_features, output_file),
+                )
+            )
+        except Exception as exc:  # best-effort; never break the pipeline
+            print(f"occurrence surface skipped in temporal validation: {exc}")
+        try:
+            surfaces.append(
+                _score("frequency_nb", _frequency_surface_by_pair(train_snap, edge_features, Gp))
+            )
+        except Exception as exc:  # best-effort
+            print(f"frequency surface skipped in temporal validation: {exc}")
+
+        result["surface_metric"] = (
+            "share of held-out crashes captured in each surface's top-decile "
+            "segments (top 10% by segment count over a common universe); random 10%"
+        )
+        result["surfaces"] = surfaces
+
     output_file = Path(output_file)
     output_file.parent.mkdir(parents=True, exist_ok=True)
     output_file.write_text(json.dumps(result, indent=2), encoding="utf-8")
@@ -559,4 +674,8 @@ def temporal_validation(
         f"(random {hit/0.10:.2f}×, length {hit/length_recall:.2f}×, "
         f"memory {hit/memory_recall:.2f}×)"
     )
+    for s in result.get("surfaces", []):
+        r = s.get("top_decile_recall")
+        if r is not None:
+            print(f"  surface {s['surface']:<16} {r:.1%}  ({s.get('lift_over_random', 0):.2f}× random)")
     return result

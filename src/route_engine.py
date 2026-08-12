@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,12 +14,13 @@ import osmnx as ox
 import pandas as pd
 
 from .config import (
-    FREQUENCY_MODEL_FILE,
     LOW_EXPOSURE_CLASSES,
+    OCCURRENCE_MODEL_FILE,
     OSM_GRAPH_FILE,
     ROUTE_RISK_FILE,
+    TEMPORAL_VALIDATION_FILE,
 )
-from .frequency_model import score_edges
+from .model_training import predict_edge_occurrence_risk
 from .osm_network import edge_uid, load_graph_fast
 
 
@@ -42,15 +44,12 @@ class RouteSummary:
 
 
 class RouteEngine:
-    """Compare fastest, historical GIS-risk and SPF frequency-risk routes.
+    """Compare fastest, historical GIS-risk and ML road-risk routes.
 
-    The third route is driven by the negative-binomial Safety Performance
-    Function (src/frequency_model.py), which replaces the earlier road-only
-    occurrence classifier. The SPF gives expected crashes per metre, so it is
-    normalised to a 0-1 score for the shared cost function and combined with the
-    measured low-exposure class constraint applied in `_cost_weight` (the SPF has
-    no cyclist-volume denominator, so classes almost nobody rides would otherwise
-    read as safe).
+    The third route is driven by the leakage-safe road-only occurrence model
+    (src/model_training.py), which predicts relative crash probability per edge
+    from road features only. Its 0-1 score feeds the shared cost function together
+    with the measured low-exposure class constraint applied in `_cost_weight`.
 
     Routing costs are evaluated lazily by a NetworkX weight callable
     (`_cost_weight`) over the per-edge constants baked in once at init by
@@ -61,11 +60,11 @@ class RouteEngine:
         self,
         graph_file: str | Path = OSM_GRAPH_FILE,
         route_risk_file: str | Path = ROUTE_RISK_FILE,
-        frequency_model_file: str | Path = FREQUENCY_MODEL_FILE,
+        occurrence_model_file: str | Path = OCCURRENCE_MODEL_FILE,
     ):
         self.graph_file = Path(graph_file)
         self.route_risk_file = Path(route_risk_file)
-        self.frequency_model_file = Path(frequency_model_file)
+        self.occurrence_model_file = Path(occurrence_model_file)
 
         if not self.graph_file.exists():
             raise FileNotFoundError(f"Missing OSM graph: {self.graph_file}")
@@ -81,26 +80,25 @@ class RouteEngine:
         if not self.historical_lookup:
             self.historical_lookup = self._lookup("historical_risk_norm")
 
-        # Prefer the SPF score the pipeline already persisted into the route-risk
-        # CSV — reading a column is instant. Only fall back to scoring the whole
-        # network at startup (loading the model, deriving junction_ends, running
-        # the prediction over ~441k edges) when that column is absent.
-        if "spf_risk_norm" in self.route_risk.columns:
-            self.spf_bundle = None
-            self.spf_risk_table = self.route_risk
-            self.spf_lookup = self._lookup_from_table(self.route_risk, "spf_risk_norm")
+        # Third route = leakage-safe road-only occurrence model. Prefer a
+        # per-edge column the pipeline may have persisted (instant); otherwise
+        # load the saved occurrence model and score the network once at startup.
+        if "ml_occurrence_risk" in self.route_risk.columns:
+            self.ml_bundle = None
+            self.ml_risk_table = self.route_risk
+            self.ml_lookup = self._lookup_from_table(self.route_risk, "ml_occurrence_risk")
         else:
-            self.spf_bundle = (
-                joblib.load(self.frequency_model_file)
-                if self.frequency_model_file.exists()
+            self.ml_bundle = (
+                joblib.load(self.occurrence_model_file)
+                if self.occurrence_model_file.exists()
                 else None
             )
-            self.spf_risk_table = (
-                self._build_spf_risk_table() if self.spf_bundle is not None else None
+            self.ml_risk_table = (
+                self._build_ml_risk_table() if self.ml_bundle is not None else None
             )
-            self.spf_lookup = (
-                self._lookup_from_table(self.spf_risk_table, "spf_risk_norm")
-                if self.spf_risk_table is not None
+            self.ml_lookup = (
+                self._lookup_from_table(self.ml_risk_table, "ml_occurrence_risk")
+                if self.ml_risk_table is not None
                 else {}
             )
 
@@ -127,7 +125,7 @@ class RouteEngine:
             uid = edge_uid(u, v, k)
             data["length_m"] = float(data.get("length", 1.0))
             data["hist_risk"] = float(np.clip(self.historical_lookup.get(uid, 0.0), 0.0, 1.0))
-            data["spf_risk"] = float(np.clip(self.spf_lookup.get(uid, 0.0), 0.0, 1.0))
+            data["ml_risk"] = float(np.clip(self.ml_lookup.get(uid, 0.0), 0.0, 1.0))
             data["low_exposure"] = highway_lookup.get(uid, "") in LOW_EXPOSURE_CLASSES
 
         # Node lat/lon for the A* straight-line heuristic, and a per-engine
@@ -173,18 +171,16 @@ class RouteEngine:
     def _lookup(self, col: str) -> dict[str, float]:
         return self._lookup_from_table(self.route_risk, col)
 
-    def _build_spf_risk_table(self) -> pd.DataFrame | None:
-        """Fallback: score the network with the SPF at startup.
+    def _build_ml_risk_table(self) -> pd.DataFrame | None:
+        """Fallback: score the network with the occurrence model at startup.
 
-        Only reached when the pipeline did not persist `spf_risk_norm` into the
-        route-risk CSV. Derives `junction_ends` from the graph and runs the model
-        over every edge (slow — this is exactly what persisting the column in
-        `run_pipeline.py` avoids). Degrades to no SPF route on any failure.
+        Only reached when the pipeline did not persist `ml_occurrence_risk` into
+        the route-risk CSV. Degrades to no ML route on any failure.
         """
         try:
-            return score_edges(self.route_risk, self.G, self.spf_bundle, strict=False)
+            return predict_edge_occurrence_risk(self.route_risk, self.ml_bundle)
         except Exception as exc:  # noqa: BLE001 - degrade gracefully in the app
-            print(f"SPF route disabled: could not score edges ({exc}).")
+            print(f"ML route disabled: could not score edges ({exc}).")
             return None
 
     # ------------------------------------------------------------------
@@ -388,7 +384,7 @@ class RouteEngine:
         """Length and length-weighted risk of a route.
 
         `risk_attr` selects which precomputed risk to weight by (`hist_risk`,
-        `spf_risk`, or None for distance-only). No per-request graph state is
+        `ml_risk`, or None for distance-only). No per-request graph state is
         read, so a route can be summarised under any risk model without
         re-attaching costs.
         """
@@ -470,23 +466,23 @@ class RouteEngine:
         )
         historical_summary = self.summarize_route(historical_route, "hist_risk")
 
-        if self.spf_lookup:
-            spf_weight = self._cost_weight("spf_risk", safety_preference, hour)
-            fastest_spf = self.summarize_route(fastest_route, "spf_risk")
-            spf_route = nx.astar_path(
+        if self.ml_lookup:
+            ml_weight = self._cost_weight("ml_risk", safety_preference, hour)
+            fastest_ml = self.summarize_route(fastest_route, "ml_risk")
+            ml_route = nx.astar_path(
                 self.G, start_node, end_node,
-                heuristic=self._straight_line_heuristic, weight=spf_weight,
+                heuristic=self._straight_line_heuristic, weight=ml_weight,
             )
-            spf_summary = self.summarize_route(spf_route, "spf_risk")
+            ml_summary = self.summarize_route(ml_route, "ml_risk")
         else:
-            fastest_spf = None
-            spf_route = None
-            spf_summary = None
+            fastest_ml = None
+            ml_route = None
+            ml_summary = None
 
         result = {
             "fastest_route": fastest_route,
             "historical_route": historical_route,
-            "spf_route": spf_route,
+            "ml_route": ml_route,
             "fastest_distance_summary": fastest_distance.as_dict(),
             "fastest_historical_summary": fastest_hist.as_dict(),
             "historical_summary": historical_summary.as_dict(),
@@ -497,12 +493,12 @@ class RouteEngine:
             "destination_coords": dest_coords,
         }
 
-        if spf_summary is not None and fastest_spf is not None:
+        if ml_summary is not None and fastest_ml is not None:
             result.update({
-                "fastest_spf_summary": fastest_spf.as_dict(),
-                "spf_summary": spf_summary.as_dict(),
-                "spf_risk_reduction_pct": self._pct_reduction(
-                    fastest_spf.length_weighted_risk, spf_summary.length_weighted_risk
+                "fastest_ml_summary": fastest_ml.as_dict(),
+                "ml_summary": ml_summary.as_dict(),
+                "ml_risk_reduction_pct": self._pct_reduction(
+                    fastest_ml.length_weighted_risk, ml_summary.length_weighted_risk
                 ),
             })
 
@@ -528,28 +524,76 @@ class RouteEngine:
             f"historical risk reduction: {result['historical_risk_reduction_pct']:.1f}%"
         )
 
-        if result.get("spf_summary") is not None:
-            spf_fast = result["fastest_spf_summary"]
-            spf = result["spf_summary"]
+        if result.get("ml_summary") is not None:
+            ml_fast = result["fastest_ml_summary"]
+            ml = result["ml_summary"]
             lines.append("")
-            lines.append(f"  SPF frequency-risk evaluation of fastest route: {spf_fast['length_weighted_risk']:.4f}")
+            lines.append(f"  ML road-risk evaluation of fastest route: {ml_fast['length_weighted_risk']:.4f}")
             lines.append(
-                f"- SPF frequency-risk route: {spf['distance_km']:.2f} km, "
-                f"SPF risk {spf['length_weighted_risk']:.4f}"
+                f"- ML road-risk route: {ml['distance_km']:.2f} km, "
+                f"ML risk {ml['length_weighted_risk']:.4f}"
             )
             lines.append(
-                f"  Detour: {spf['distance_km'] - fastest['distance_km']:.2f} km; "
-                f"SPF risk reduction: {result['spf_risk_reduction_pct']:.1f}%"
+                f"  Detour: {ml['distance_km'] - fastest['distance_km']:.2f} km; "
+                f"ML risk reduction: {result['ml_risk_reduction_pct']:.1f}%"
             )
 
         lines.append("")
         lines.append(
             "Interpretation: these are relative model scores, not personal crash probabilities. "
-            "The historical route reduces historical spatial-risk exposure; the SPF route uses a "
-            "negative-binomial crash-frequency model (expected crashes per metre) with a "
-            "low-exposure class constraint."
+            "The historical route reduces historical spatial-risk exposure; the ML route uses a "
+            "leakage-safe road-only occurrence model."
         )
+
+        lines += self._held_out_comparison_block()
         return "\n".join(lines)
+
+    @staticmethod
+    def _held_out_comparison_block(
+        validation_file: str | Path = TEMPORAL_VALIDATION_FILE,
+    ) -> list[str]:
+        """One line per model: how well each predicts future crashes it never saw.
+
+        Reads the JSON written by spatial_risk.temporal_validation. Best-effort:
+        returns nothing if the file is absent or has no `surfaces`, so the
+        recommendation is unchanged.
+        """
+        try:
+            path = Path(validation_file)
+            if not path.exists():
+                return []
+            data = json.loads(path.read_text(encoding="utf-8"))
+            rows = [
+                s for s in (data.get("surfaces") or [])
+                if s.get("top_decile_recall") is not None
+            ]
+            if not rows:
+                return []
+
+            label = {
+                "historical_gis": "Historical GIS",
+                "occurrence_ml": "ML occurrence",
+                "frequency_nb": "Frequency SPF",
+            }
+            best = max(rows, key=lambda s: s["top_decile_recall"])
+            train_years = str(data.get("train_years", "")).strip()
+            test_years = str(data.get("test_years", "")).strip()
+
+            lines = [
+                "",
+                f"Which model predicts best (tested on later crashes it never saw, "
+                f"{train_years} → {test_years}; a random 10% of streets would catch 10%):",
+            ]
+            for s in rows:
+                name = label.get(s["surface"], s["surface"])
+                recall = 100.0 * float(s["top_decile_recall"])
+                tag = "  ← best" if s is best else ""
+                lines.append(
+                    f"- {name}: {recall:.0f}% of future crashes fall in its top-10% streets{tag}"
+                )
+            return lines
+        except Exception:
+            return []
 
     def route_to_coordinates(self, route: Route | None) -> list[tuple[float, float]]:
         if route is None:
@@ -569,8 +613,8 @@ class RouteEngine:
         folium.PolyLine(self.route_to_coordinates(result["fastest_route"]), color="red", weight=5, opacity=0.75, tooltip="Fastest").add_to(m)
         folium.PolyLine(self.route_to_coordinates(result["historical_route"]), color="orange", weight=5, opacity=0.75, tooltip="Historical GIS-risk").add_to(m)
 
-        if result.get("spf_route") is not None:
-            folium.PolyLine(self.route_to_coordinates(result["spf_route"]), color="green", weight=5, opacity=0.85, tooltip="SPF frequency-risk").add_to(m)
+        if result.get("ml_route") is not None:
+            folium.PolyLine(self.route_to_coordinates(result["ml_route"]), color="green", weight=5, opacity=0.85, tooltip="ML road-risk").add_to(m)
 
         folium.Marker(start, tooltip="Start", icon=folium.Icon(color="blue", icon="play")).add_to(m)
         folium.Marker(dest, tooltip="Destination", icon=folium.Icon(color="black", icon="flag")).add_to(m)
@@ -582,7 +626,7 @@ class RouteEngine:
             <b>Route Legend</b><br>
             <span style="color:red;">■</span> Fastest route<br>
             <span style="color:orange;">■</span> Historical GIS-risk route<br>
-            <span style="color:green;">■</span> SPF frequency-risk route<br>
+            <span style="color:green;">■</span> ML road-risk route<br>
         </div>
         """
         m.get_root().html.add_child(folium.Element(legend))
