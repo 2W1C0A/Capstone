@@ -609,7 +609,7 @@ class RouteEngine:
 
         m = folium.Map(location=center, zoom_start=13, tiles="OpenStreetMap")
         folium.PolyLine(self.route_to_coordinates(result["fastest_route"]), color="red", weight=5, opacity=0.75, tooltip="Fastest").add_to(m)
-        folium.PolyLine(self.route_to_coordinates(result["historical_route"]), color="orange", weight=5, opacity=0.75, tooltip="Historical GIS-risk").add_to(m)
+        folium.PolyLine(self.route_to_coordinates(result["historical_route"]), color="#1f4e8c", weight=5, opacity=0.9, tooltip="Historical GIS-risk").add_to(m)
 
         if result.get("ml_route") is not None:
             folium.PolyLine(self.route_to_coordinates(result["ml_route"]), color="green", weight=5, opacity=0.85, tooltip="ML road-risk").add_to(m)
@@ -619,12 +619,13 @@ class RouteEngine:
 
         legend = """
         <div style="position: fixed; bottom: 40px; left: 40px; z-index: 9999;
-                    background: white; padding: 12px; border: 2px solid grey;
-                    border-radius: 6px; font-size: 14px;">
-            <b>Route Legend</b><br>
-            <span style="color:red;">■</span> Fastest route<br>
-            <span style="color:orange;">■</span> Historical GIS-risk route<br>
-            <span style="color:green;">■</span> ML road-risk route<br>
+                    background: #ffffff; color: #1a1a1a; padding: 12px 14px;
+                    border: 1px solid #cccccc; border-radius: 6px;
+                    font-size: 14px; line-height: 1.7;">
+            <div style="font-weight: 600; margin-bottom: 6px; color: #1a1a1a;">Route legend</div>
+            <div style="color: #1a1a1a;"><span style="color:#d64545;">&#9632;</span>&nbsp; Fastest route</div>
+            <div style="color: #1a1a1a;"><span style="color:#1F4E8C;">&#9632;</span>&nbsp; Historical GIS-risk route</div>
+            <div style="color: #1a1a1a;"><span style="color:#12A55F;">&#9632;</span>&nbsp; SPF frequency-risk route</div>
         </div>
         """
         m.get_root().html.add_child(folium.Element(legend))
