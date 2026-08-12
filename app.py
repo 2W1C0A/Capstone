@@ -190,36 +190,6 @@ h1,h2,h3,h4{
   font-family:'JetBrains Mono',monospace; font-size:.73rem; color:var(--muted);
   margin:0 0 10px;
 }
-div[data-testid="stMetric"]{
-  background:#ffffff !important;
-  border:1px solid #e0e0e0 !important;
-  border-radius:10px; padding:14px 16px;
-}
-div[data-testid="stMetric"] label,
-div[data-testid="stMetricLabel"],
-div[data-testid="stMetricLabel"] p{
-  color:#5a5a5a !important;
-}
-div[data-testid="stMetricValue"],
-div[data-testid="stMetricValue"] div{
-  color:#111111 !important;
-}
-div[data-testid="stMetricDelta"],
-div[data-testid="stMetricDelta"] div{
-  color:#5a5a5a !important;
-}
-button[data-baseweb="tab"],
-button[data-baseweb="tab"] *{
-  color:#3a3a3a !important; font-weight:500 !important; font-size:.9rem !important;
-}
-button[data-baseweb="tab"][aria-selected="true"],
-button[data-baseweb="tab"][aria-selected="true"] *{
-  color:#000000 !important; font-weight:600 !important;
-}
-div[data-testid="stButton"] button,
-div[data-testid="stButton"] button *{
-  color:#ffffff !important;
-}
 
 /* ---- sidebar ------------------------------------------------------------ */
 section[data-testid="stSidebar"]{
@@ -599,6 +569,7 @@ def lane_card(
     caption: str,
     rows: list[tuple[str, str]],
     reduction_pct: float | None = None,
+    scale: str | None = None,
 ):
     name, colour = ROUTE_STYLES[kind]
 
@@ -609,9 +580,12 @@ def lane_card(
         else:
             value, fill = f"+{abs(reduction_pct):.1f}%", "#DC3B32"
         width = max(3.0, min(100.0, abs(reduction_pct)))
+        # Name the scale so the two cards are not read as directly comparable —
+        # each reduction is on its own model's risk scale.
+        cap_label = f"{scale} vs fastest" if scale else "risk vs fastest"
         bar = (
             f'<div class="bar"><span style="width:{width:.0f}%;background:{fill}"></span></div>'
-            f'<div class="bar-cap"><span>risk vs fastest</span><span>{value}</span></div>'
+            f'<div class="bar-cap"><span>{html.escape(cap_label)}</span><span>{value}</span></div>'
         )
 
     kv = "".join(
@@ -704,6 +678,7 @@ with tab1:
                     ("segments", f"{int(num(historical, 'n_segments')):d}"),
                 ],
                 reduction_pct=hist_reduction,
+                scale="historical-risk",
             )
 
         with cols[2]:
@@ -718,6 +693,7 @@ with tab1:
                         ("segments", f"{int(num(ml, 'n_segments')):d}"),
                     ],
                     reduction_pct=ml_reduction,
+                    scale="ML-risk",
                 )
             else:
                 st.markdown(
@@ -734,6 +710,42 @@ with tab1:
             "Risk values are relative model scores. Historical GIS risk and ML road-risk "
             "are reported on their own scales and should not be interpreted as personal crash probabilities."
         )
+
+        # Which risk model is actually most predictive — the apples-to-apples,
+        # held-out comparison (all three scored on the same future crashes). This
+        # is the honest "which route to trust" signal, unlike the per-card
+        # reductions which each live on their own scale.
+        _temporal = read_json_if_exists(TEMPORAL_VALIDATION_FILE)
+        _surfaces = [
+            s for s in (_temporal or {}).get("surfaces", [])
+            if s.get("top_decile_recall") is not None
+        ]
+        if _surfaces:
+            _labels = {
+                "historical_gis": "Historical GIS",
+                "occurrence_ml": "ML occurrence",
+                "frequency_nb": "Frequency SPF",
+            }
+            _best = max(_surfaces, key=lambda s: s["top_decile_recall"])
+            _items = ""
+            for s in _surfaces:
+                _nm = html.escape(_labels.get(s["surface"], s["surface"]))
+                _rec = 100.0 * float(s["top_decile_recall"])
+                _tag = ' <b style="color:#12A55F">← best</b>' if s is _best else ""
+                _items += (
+                    f'<li>{_nm}: {_rec:.0f}% of future crashes fall in its '
+                    f'top-10% streets{_tag}</li>'
+                )
+            _ty = html.escape(str(_temporal.get("train_years", "")))
+            _te = html.escape(str(_temporal.get("test_years", "")))
+            st.markdown("")
+            st.markdown(
+                '<div class="panel"><b>Which model predicts best?</b> '
+                '<span style="opacity:.7">Tested on later crashes it never saw '
+                f'({_ty} → {_te}); a random 10% of streets would catch 10%.</span>'
+                f'<ul style="margin:.45rem 0 0 1.1rem;padding:0">{_items}</ul></div>',
+                unsafe_allow_html=True,
+            )
 
         st.markdown("")
         left, right = st.columns([1.4, 1], gap="large")
