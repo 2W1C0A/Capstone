@@ -127,6 +127,9 @@ def top_risk_table(
         "fatal_count": "sum",
     }
     cols = {k: v for k, v in cols.items() if k in df.columns}
+    # Directed edges come in pairs; summing both doubles every street's length.
+    if "pair_id" in df.columns:
+        df = df.drop_duplicates("pair_id")
     tbl = df.groupby("name").agg(cols).reset_index()
     tbl = tbl.rename(columns={"edge_length_m": "length_m", "severity_sum": "weighted"})
     tbl["length_km"] = tbl["length_m"] / 1000.0
