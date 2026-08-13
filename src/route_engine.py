@@ -18,6 +18,7 @@ from .config import (
     OCCURRENCE_MODEL_FILE,
     OSM_GRAPH_FILE,
     ROUTE_RISK_FILE,
+    SNAPPED_ACCIDENTS_FILE,
     TEMPORAL_VALIDATION_FILE,
 )
 from .model_training import predict_edge_occurrence_risk
@@ -593,6 +594,110 @@ class RouteEngine:
         except Exception:
             return []
 
+    def junction_ksi_sites(self, min_ksi: int = 2) -> pd.DataFrame:
+        """Junctions with a record of serious or fatal bicycle crashes.
+
+        Aggregated to junctions rather than plotted per crash: 80.8% of crashes
+        fall within 20 m of a node, and 88.5% of junctions carrying any serious
+        crash carry exactly one. Requiring two, or any fatality, keeps every place
+        someone died while cutting 3,395 junctions to about 430.
+
+        Read once and held on the instance — app.py caches the engine, so the CSV
+        is not re-read per request.
+        """
+        if getattr(self, "_ksi_sites", None) is not None:
+            return self._ksi_sites
+
+        acc = pd.read_csv(SNAPPED_ACCIDENTS_FILE)
+        ksi = acc[(acc["is_ksi"] == 1) & (acc["near_junction"] == 1)]
+
+        j = (
+            ksi.groupby("nearest_node")
+            .agg(
+                ksi=("is_ksi", "size"),
+                fatal=("is_fatal", "sum"),
+                truck=("is_truck", "sum"),
+                lat=("latitude", "median"),
+                lon=("longitude", "median"),
+            )
+            .reset_index()
+        )
+
+        self._ksi_sites = j[(j["ksi"] >= min_ksi) | (j["fatal"] > 0)].copy()
+        # The node's own coordinates place the marker on the junction itself rather
+        # than at the centroid of the crashes assigned to it.
+        nodes = self.G.nodes
+        j["lat"] = [
+            float(nodes[n]["y"]) if n in nodes else lat
+            for n, lat in zip(j["nearest_node"], j["lat"])
+        ]
+        j["lon"] = [
+            float(nodes[n]["x"]) if n in nodes else lon
+            for n, lon in zip(j["nearest_node"], j["lon"])
+        ]
+        return self._ksi_sites
+
+    def add_junction_markers(
+        self, m: folium.Map, route: Route | None, radius_m: float = 50.0
+    ) -> int:
+        """Mark junctions along a route where serious crashes are on record.
+
+        Distances are approximated from degrees rather than reprojecting, which is
+        accurate enough at Berlin's latitude for a 50 m band.
+        """
+        coords = self.route_to_coordinates(route)
+        if not coords:
+            return 0
+
+        sites = self.junction_ksi_sites()
+        if sites.empty:
+            return 0
+
+        LAT_M = 111_320.0
+        LON_M = 111_320.0 * math.cos(math.radians(52.52))
+
+        lats = np.array([c[0] for c in coords])
+        lons = np.array([c[1] for c in coords])
+
+        dy = (sites["lat"].to_numpy()[:, None] - lats[None, :]) * LAT_M
+        dx = (sites["lon"].to_numpy()[:, None] - lons[None, :]) * LON_M
+        near = np.hypot(dx, dy).min(axis=1) <= radius_m
+
+        sel = sites[near].sort_values(["fatal", "ksi"], ascending=False)
+
+        for _, r in sel.iterrows():
+            fatal = int(r["fatal"])
+            n_ksi = int(r["ksi"])
+            n_truck = int(r["truck"])
+            n_serious = n_ksi - fatal
+
+            if fatal:
+                colour, fill, size = "#8F2A15", "#D85A30", 9 + 2 * fatal
+            else:
+                colour, fill, size = "#8A5A0B", "#F0B24A", 6 + n_ksi
+
+            lines = []
+            if fatal:
+                lines.append(f"<b>{fatal} killed</b>")
+            if n_serious:
+                lines.append(f"<b>{n_serious} seriously injured</b>")
+            if n_truck:
+                lines.append(f"{n_truck} involving a lorry")
+            lines.append("<i>recorded 2018-2025</i>")
+
+            folium.CircleMarker(
+                location=[float(r["lat"]), float(r["lon"])],
+                radius=size,
+                color=colour,
+                weight=2,
+                fill=True,
+                fill_color=fill,
+                fill_opacity=0.85,
+                tooltip=folium.Tooltip("<br>".join(lines)),
+            ).add_to(m)
+
+        return len(sel)
+    
     def route_to_coordinates(self, route: Route | None) -> list[tuple[float, float]]:
         if route is None:
             return []
@@ -614,18 +719,27 @@ class RouteEngine:
         if result.get("ml_route") is not None:
             folium.PolyLine(self.route_to_coordinates(result["ml_route"]), color="green", weight=5, opacity=0.85, tooltip="ML road-risk").add_to(m)
 
+        # Junctions on the fastest route with recorded serious crashes. Drawn
+        # before the start and destination pins so those stay on top.
+        
+        n_flagged = self.add_junction_markers(m, result.get("fastest_route"))
+
         folium.Marker(start, tooltip="Start", icon=folium.Icon(color="blue", icon="play")).add_to(m)
         folium.Marker(dest, tooltip="Destination", icon=folium.Icon(color="black", icon="flag")).add_to(m)
 
         legend = """
-        <div style="position: fixed; bottom: 40px; left: 40px; z-index: 9999;
-                    background: #ffffff; color: #1a1a1a; padding: 12px 14px;
-                    border: 1px solid #cccccc; border-radius: 6px;
-                    font-size: 14px; line-height: 1.7;">
+        <div style="position: absolute; bottom: 12px; left: 12px; z-index: 9999;
+            background: rgba(255,255,255,0.94); color: #1a1a1a; padding: 8px 10px;
+            border: 1px solid #cccccc; border-radius: 6px;
+            font-size: 12px; line-height: 1.5;">
+        
             <div style="font-weight: 600; margin-bottom: 6px; color: #1a1a1a;">Route legend</div>
             <div style="color: #1a1a1a;"><span style="color:#d64545;">&#9632;</span>&nbsp; Fastest route</div>
             <div style="color: #1a1a1a;"><span style="color:#1F4E8C;">&#9632;</span>&nbsp; Historical GIS-risk route</div>
             <div style="color: #1a1a1a;"><span style="color:#12A55F;">&#9632;</span>&nbsp; ML road-risk route</div>
+            <div style="margin-top: 8px; padding-top: 6px; border-top: 1px solid #e0e0e0; color: #1a1a1a;"><span style="color:#D85A30;">&#9679;</span>&nbsp; Junction where a cyclist died</div>
+            <div style="color: #1a1a1a;"><span style="color:#F0B24A;">&#9679;</span>&nbsp; Junction with serious injuries</div>
+            <div style="margin-top: 6px; font-size: 11px; color: #666666; max-width: 220px; line-height: 1.4;">Recorded 2018&ndash;2025. Counts, not probabilities &mdash; busy junctions accumulate more crashes.</div>
         </div>
         """
         m.get_root().html.add_child(folium.Element(legend))
