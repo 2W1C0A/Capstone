@@ -640,7 +640,7 @@ def score_edges(
     edge_features: pd.DataFrame,
     graph,
     model_bundle: dict | str | Path = FREQUENCY_MODEL_FILE,
-    cap_quantile: float = 0.95,
+    cap_quantile: float = 0.999,
     strict: bool = False,
 ) -> pd.DataFrame:
     """Attach `expected_crashes` and a 0-1 `spf_risk_norm` to every edge.
@@ -656,12 +656,18 @@ def score_edges(
     scored = predict_edge_expected_crashes(scored, model_bundle, strict=strict)
 
     expected = pd.to_numeric(scored["expected_crashes"], errors="coerce").fillna(0.0)
-    cap = expected.quantile(cap_quantile)
+
+    # Same trap as the p95 cap in build_edge_risk: expected_crashes is heavily
+    # right-skewed, so a raw p95 cap pinned 22,095 edges (5.00%) at exactly 1.0
+    # and the router could not rank inside the top of its own signal. log1p first,
+    # then cap far out in the tail — the fix that took historical_risk_norm from
+    # 17,372 tied segments down to 325.
+    lg = np.log1p(expected)
+    cap = lg.quantile(cap_quantile)
     if not np.isfinite(cap) or cap <= 0:
-        cap = expected.max()
-    scored["spf_risk_norm"] = (
-        (expected / cap).clip(0, 1) if cap and cap > 0 else 0.0
-    )
+        cap = lg.max()
+    scored["spf_risk_norm"] = (lg / cap).clip(0, 1) if cap > 0 else 0.0
+
     return scored
 
 
