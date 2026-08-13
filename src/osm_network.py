@@ -201,10 +201,26 @@ def build_edge_features(
     )
     edges["maxspeed_num"] = edges["maxspeed_num"].fillna(edges["maxspeed_num"].median()).fillna(30.0)
 
+    # Graph-structural features (leakage-safe: derived from node degrees, not from
+    # any accident data). junction_ends is the strongest covariate in the frequency
+    # SPF; adding it here gives the occurrence model the junction/connectivity
+    # signal it previously lacked. Best-effort so feature enrichment can never
+    # break the edge-feature build.
+    try:
+        from .frequency_model import add_junction_features
+
+        edges = add_junction_features(edges, Gp)
+    except Exception as exc:  # noqa: BLE001
+        print(f"junction features skipped in build_edge_features: {exc}")
+        for _col in ("junction_ends", "max_degree", "junction_density"):
+            if _col not in edges.columns:
+                edges[_col] = 0
+
     keep = [
         "edge_uid", "pair_id", "u", "v", "key",
         "edge_length_m", "highway_raw", "highway_simple",
         "has_cycleway", "maxspeed_num", "maxspeed_missing",
+        "junction_ends", "max_degree", "junction_density",
         "geometry",
     ]
     keep = [c for c in keep if c in edges.columns]

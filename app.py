@@ -756,16 +756,99 @@ with tab1:
                 "occurrence_ml": "ML occurrence",
                 "frequency_nb": "Frequency SPF",
             }
-            _best = max(_surfaces, key=lambda s: s["top_decile_recall"])
+            # Show a single number per model. Use the (hidden) bootstrap CIs only
+            # to decide the label: one model is "← best" only if its 95% interval
+            # clears the runner-up's (no overlap); otherwise every model whose
+            # interval overlaps the leader's is marked "statistically tied".
+            def _tags(rows, rkey, lokey, hikey, leader_test=None):
+                valid = [r for r in rows if r.get(rkey) is not None]
+                if not valid:
+                    return {}
+                leader = max(valid, key=lambda r: r[rkey])
+                # A significant paired-difference test crowns a real winner even
+                # when the marginal CIs overlap.
+                if leader_test and leader_test.get("significant"):
+                    lname = leader_test.get("leader")
+                    return {id(r): ("best" if r.get("surface") == lname else "") for r in valid}
+                have_ci = all(
+                    r.get(lokey) is not None and r.get(hikey) is not None for r in valid
+                )
+                if not have_ci:
+                    return {id(r): ("best" if r is leader else "") for r in valid}
+                lo, hi = leader[lokey], leader[hikey]
+                tied = [r for r in valid if not (r[hikey] < lo or r[lokey] > hi)]
+                # A clear winner (its interval clears the runner-up) → "best".
+                if len(tied) <= 1:
+                    return {id(r): ("best" if r is leader else "") for r in valid}
+                # Otherwise a tie. Still surface the leader honestly: if exactly one
+                # model has the top point estimate, mark it "highest" (within noise);
+                # the rest of the overlapping set is "tied".
+                top = leader[rkey]
+                unique_top = sum(1 for r in valid if r[rkey] == top) == 1
+                out = {}
+                for r in valid:
+                    if r not in tied:
+                        out[id(r)] = ""
+                    elif r is leader and unique_top:
+                        out[id(r)] = "highest"
+                    else:
+                        out[id(r)] = "tied"
+                return out
+
+            def _mark(tag):
+                if tag == "best":
+                    return ' <b style="color:#12A55F">← best</b>'
+                if tag == "highest":
+                    return (
+                        ' <b style="color:#12A55F">← highest</b>'
+                        ' <span style="opacity:.6">(within noise)</span>'
+                    )
+                if tag == "tied":
+                    return ' <span style="opacity:.6">— statistically tied</span>'
+                return ""
+
+            _has_ci = any(s.get("ci_low") is not None for s in _surfaces)
+
+            _tag_all = _tags(
+                _surfaces, "top_decile_recall", "ci_low", "ci_high",
+                _temporal.get("overall_leader_test"),
+            )
             _items = ""
             for s in _surfaces:
                 _nm = html.escape(_labels.get(s["surface"], s["surface"]))
                 _rec = 100.0 * float(s["top_decile_recall"])
-                _tag = ' <b style="color:#12A55F">← best</b>' if s is _best else ""
                 _items += (
                     f'<li>{_nm}: {_rec:.0f}% of future crashes fall in its '
-                    f'top-10% streets{_tag}</li>'
+                    f'top-10% streets{_mark(_tag_all.get(id(s), ""))}</li>'
                 )
+
+            # Second view: only crashes on streets with no crash in the training
+            # window — the honest test for a road-feature model.
+            _nbc = [s for s in _surfaces if s.get("nbc_recall") is not None]
+            _nbc_block = ""
+            if _nbc:
+                _tag_nbc = _tags(
+                    _nbc, "nbc_recall", "nbc_ci_low", "nbc_ci_high",
+                    _temporal.get("nbc_leader_test"),
+                )
+                _nbc_items = ""
+                for s in _nbc:
+                    _nm = html.escape(_labels.get(s["surface"], s["surface"]))
+                    _r = 100.0 * float(s["nbc_recall"])
+                    _nbc_items += f'<li>{_nm}: {_r:.0f}%{_mark(_tag_nbc.get(id(s), ""))}</li>'
+                _nbc_block = (
+                    '<div style="margin-top:.6rem"><b>On streets with no past crash</b> '
+                    '<span style="opacity:.7">(where a historical crash map is blind — '
+                    'the honest test for a road-feature model):</span>'
+                    f'<ul style="margin:.35rem 0 0 1.1rem;padding:0">{_nbc_items}</ul></div>'
+                )
+
+            _tie_note = (
+                '<div style="margin-top:.5rem;opacity:.65;font-size:.85em">'
+                '&ldquo;statistically tied&rdquo; = the models&rsquo; 95% bootstrap '
+                'intervals overlap, so the difference is within noise.</div>'
+            ) if _has_ci else ""
+
             _ty = html.escape(str(_temporal.get("train_years", "")))
             _te = html.escape(str(_temporal.get("test_years", "")))
             st.markdown("")
@@ -773,7 +856,8 @@ with tab1:
                 '<div class="panel"><b>Which model predicts best?</b> '
                 '<span style="opacity:.7">Tested on later crashes it never saw '
                 f'({_ty} → {_te}); a random 10% of streets would catch 10%.</span>'
-                f'<ul style="margin:.45rem 0 0 1.1rem;padding:0">{_items}</ul></div>',
+                f'<ul style="margin:.45rem 0 0 1.1rem;padding:0">{_items}</ul>'
+                f'{_nbc_block}{_tie_note}</div>',
                 unsafe_allow_html=True,
             )
 
