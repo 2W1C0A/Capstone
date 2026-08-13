@@ -439,8 +439,8 @@ for k, v in {
     "route_map": None,
     "route_error": None,
     "run_example": False,
-    "start_address_input": "Alexanderplatz, Berlin, Germany",
-    "destination_address_input": "Brandenburg Gate, Berlin, Germany",
+    "start_address_input": "Ritterstraße 12-14, 10969 Berlin, Germany",
+    "destination_address_input": "Hauptbahnhof, Berlin, Germany",
     "start_address_status": None,
     "destination_address_status": None,
 }.items():

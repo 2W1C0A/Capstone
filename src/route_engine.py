@@ -280,12 +280,6 @@ class RouteEngine:
         tried = "\n".join(f"- {e}" for e in errors[-5:])
         raise ValueError(
             "Could not geocode this address inside Berlin.\n\n"
-            f"Input: {address}\n\n"
-            "Try a more complete format, for example:\n"
-            "- Zillestraße 21, 10585 Berlin, Germany\n"
-            "- Alexanderplatz, Berlin, Germany\n"
-            "- 52.5219, 13.4132\n\n"
-            f"Geocoding attempts:\n{tried}"
         )
 
     @staticmethod
