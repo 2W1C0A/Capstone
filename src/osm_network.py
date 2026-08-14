@@ -217,7 +217,7 @@ def build_edge_features(
                 edges[_col] = 0
 
     keep = [
-        "edge_uid", "pair_id", "u", "v", "key",
+        "edge_uid", "pair_id", "u", "v", "key","name",
         "edge_length_m", "highway_raw", "highway_simple",
         "has_cycleway", "maxspeed_num", "maxspeed_missing",
         "junction_ends", "max_degree", "junction_density",
