@@ -33,13 +33,13 @@ def route_summary_table(result: dict) -> pd.DataFrame:
             "risk_reduction_pct": result.get("historical_risk_reduction_pct"),
         })
 
-    if result.get("ml_summary"):
+    if result.get("spf_summary"):
         rows.append({
-            "route": "ML road-risk",
-            "distance_km": result["ml_summary"]["distance_km"],
-            "risk_model": "leakage-safe road-only ML",
-            "risk_score": result["ml_summary"]["length_weighted_risk"],
-            "risk_reduction_pct": result.get("ml_risk_reduction_pct"),
+            "route": "SPF frequency-risk",
+            "distance_km": result["spf_summary"]["distance_km"],
+            "risk_model": "negative-binomial crash-frequency SPF",
+            "risk_score": result["spf_summary"]["length_weighted_risk"],
+            "risk_reduction_pct": result.get("spf_risk_reduction_pct"),
         })
 
     return pd.DataFrame(rows)
@@ -127,6 +127,9 @@ def top_risk_table(
         "fatal_count": "sum",
     }
     cols = {k: v for k, v in cols.items() if k in df.columns}
+    # Directed edges come in pairs; summing both doubles every street's length.
+    if "pair_id" in df.columns:
+        df = df.drop_duplicates("pair_id")
     tbl = df.groupby("name").agg(cols).reset_index()
     tbl = tbl.rename(columns={"edge_length_m": "length_m", "severity_sum": "weighted"})
     tbl["length_km"] = tbl["length_m"] / 1000.0

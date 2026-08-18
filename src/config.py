@@ -42,6 +42,11 @@ SEVERITY_METRICS_FILE = MODEL_DIR / "severity_model_metrics.json"
 SEVERITY_BY_HOUR_FILE = PROCESSED_DIR / "severity_by_hour.csv"
 SEVERITY_BY_HIGHWAY_FILE = PROCESSED_DIR / "severity_by_highway.csv"
 
+# Negative-binomial SPF (segment-level crash frequency). This is the deployed
+# frequency term of the routing risk surface; see src/frequency_model.py.
+FREQUENCY_MODEL_FILE = MODEL_DIR / "frequency_nb_model.joblib"
+FREQUENCY_METRICS_FILE = MODEL_DIR / "frequency_model_metrics.json"
+
 TEMPORAL_VALIDATION_FILE = MODEL_DIR / "historical_risk_temporal_validation.json"
 
 # Maps

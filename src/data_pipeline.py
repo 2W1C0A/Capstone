@@ -31,10 +31,13 @@ COLUMN_MAP = {
 
 
 LIGHT_LABELS = {
+    # ULICHTVERH (Lichtverhältnisse) in the Unfallatlas has only three valid
+    # codes (0/1/2) and carries no lit/unlit distinction. Code 2 is darkness,
+    # full stop. Verified against the official Unfallatlas codebook (DSB) in
+    # notebook 01_eda_and_analysis cell [11].
     0: "daylight",
     1: "twilight",
-    2: "dark_lit",
-    3: "dark_unlit_old_code_check",
+    2: "darkness",
 }
 
 SURFACE_LABELS = {
@@ -42,6 +45,26 @@ SURFACE_LABELS = {
     1: "wet_or_slippery",
     2: "wintery",
 }
+
+# Any of these substrings appearing in light_label means a stale mapping leaked
+# in (old "dark_lit" for code 2, or the nonexistent "dark_unlit" code 3). Use a
+# substring test, not exact set membership: the previous guard checked for
+# "dark_unlit" exactly, so the stale "dark_unlit_old_code_check" label walked
+# straight past it.
+_BAD_LIGHT_LABELS = ("dark_lit", "dark_unlit")
+
+
+def _assert_light_labels(labels) -> None:
+    bad = {
+        s
+        for s in set(map(str, labels))
+        if any(b in s for b in _BAD_LIGHT_LABELS)
+    }
+    assert not bad, (
+        f"Stale light labels {sorted(bad)}. ULICHTVERH has only codes 0/1/2 "
+        "and carries no lit/unlit distinction. "
+        "Regenerate berlin_bike_2018_2025.csv."
+    )
 
 
 def get_season(month: int) -> str:
@@ -100,8 +123,19 @@ def read_raw_unfallatlas(raw_dir: str | Path = RAW_DIR) -> pd.DataFrame:
 def _ensure_numeric(df: pd.DataFrame, cols: Iterable[str]) -> pd.DataFrame:
     out = df.copy()
     for col in cols:
-        if col in out.columns:
-            out[col] = pd.to_numeric(out[col], errors="coerce")
+        if col not in out.columns:
+            continue
+        # Unfallatlas ships German decimal commas: "53,729614888" rather than
+        # "53.729614888". pd.to_numeric turns those into NaN, and the dropna on
+        # latitude/longitude below then removes every row — silently, with no
+        # error. Notebook 01 cell [9] does this conversion; src/ did not.
+        # Note the dtype test: on pandas builds with the new string dtype these
+        # columns arrive as "str" rather than "object", so a `== object` check
+        # skips the conversion silently and every coordinate becomes NaN.
+        s = out[col]
+        if not pd.api.types.is_numeric_dtype(s):
+            s = s.astype(str).str.replace(",", ".", regex=False).replace({"nan": None})
+        out[col] = pd.to_numeric(s, errors="coerce")
     return out
 
 
@@ -124,9 +158,7 @@ def prepare_berlin_bicycle_accidents(
         df = pd.read_csv(output_file)
         # Canary for the corrected light mapping.
         if "light_label" in df.columns:
-            assert "dark_unlit" not in set(df["light_label"].astype(str)), (
-                "Stale light labels detected. Regenerate berlin_bike_2018_2025.csv."
-            )
+            _assert_light_labels(df["light_label"])
         return df
 
     if raw_file is not None:
@@ -224,9 +256,14 @@ def prepare_berlin_bicycle_accidents(
     out = out[keep].reset_index(drop=True)
 
     # Canary copied from the improved notebook.
-    assert "dark_unlit" not in set(out.get("light_label", pd.Series(dtype=str)).astype(str)), (
-        "Stale light labels detected. Regenerate berlin_bike_2018_2025.csv."
-    )
+    _assert_light_labels(out.get("light_label", pd.Series(dtype=str)))
+
+    if len(out) < 30_000:
+        raise ValueError(
+            f"Only {len(out):,} Berlin bicycle rows survived filtering; expected "
+            "about 37,900. Check the decimal-comma conversion in _ensure_numeric "
+            "and that ULAND and IstRad are present in every release."
+        )
 
     output_file.parent.mkdir(parents=True, exist_ok=True)
     out.to_csv(output_file, index=False)

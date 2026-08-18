@@ -190,6 +190,36 @@ h1,h2,h3,h4{
   font-family:'JetBrains Mono',monospace; font-size:.73rem; color:var(--muted);
   margin:0 0 10px;
 }
+div[data-testid="stMetric"]{
+  background:#ffffff !important;
+  border:1px solid #e0e0e0 !important;
+  border-radius:10px; padding:14px 16px;
+}
+div[data-testid="stMetric"] label,
+div[data-testid="stMetricLabel"],
+div[data-testid="stMetricLabel"] p{
+  color:#5a5a5a !important;
+}
+div[data-testid="stMetricValue"],
+div[data-testid="stMetricValue"] div{
+  color:#111111 !important;
+}
+div[data-testid="stMetricDelta"],
+div[data-testid="stMetricDelta"] div{
+  color:#5a5a5a !important;
+}
+button[data-baseweb="tab"],
+button[data-baseweb="tab"] *{
+  color:#3a3a3a !important; font-weight:500 !important; font-size:.9rem !important;
+}
+button[data-baseweb="tab"][aria-selected="true"],
+button[data-baseweb="tab"][aria-selected="true"] *{
+  color:#000000 !important; font-weight:600 !important;
+}
+div[data-testid="stButton"] button,
+div[data-testid="stButton"] button *{
+  color:#ffffff !important;
+}
 
 /* ---- sidebar ------------------------------------------------------------ */
 section[data-testid="stSidebar"]{
@@ -272,7 +302,7 @@ st.markdown(THEME_CSS, unsafe_allow_html=True)
 ROUTE_STYLES = {
     "fastest": ("Fastest", "#2B3440"),
     "historical": ("Historical GIS risk", "#E8A317"),
-    "ml": ("ML road risk", "#12A55F"),
+    "spf": ("ML road-risk", "#12A55F"),
 }
 
 SAFETY_WORDS = {
@@ -409,8 +439,8 @@ for k, v in {
     "route_map": None,
     "route_error": None,
     "run_example": False,
-    "start_address_input": "Alexanderplatz, Berlin, Germany",
-    "destination_address_input": "Brandenburg Gate, Berlin, Germany",
+    "start_address_input": "Ritterstraße 12-14, 10969 Berlin, Germany",
+    "destination_address_input": "Hauptbahnhof, Berlin, Germany",
     "start_address_status": None,
     "destination_address_status": None,
 }.items():
@@ -467,17 +497,18 @@ with st.sidebar:
         23,
         8,
         help=(
-            "In the current leakage-safe occurrence model, hour does not visibly "
-            "change the route. The route ranking is mainly spatial."
+            "The deployed route models (road-only ML occurrence and historical GIS risk) "
+            "do not use hour, so it does not change the route. The ranking is mainly spatial."
         ),
     )
 
     with st.expander("Does the time change the route?"):
         st.write(
-            "Not in the current deployed model. The earlier leakage analysis showed that "
+            "Not in the current route models. The earlier leakage analysis showed that "
             "time-only accident occurrence features carry almost no signal under the current "
-            "negative-sampling design. Time is kept here for transparency and future "
-            "severity modelling."
+            "negative-sampling design, and the deployed road-only occurrence model uses road "
+            "features only and does not vary by hour. Time is kept here for transparency and "
+            "future severity modelling."
         )
 
     invalid_address = (
@@ -505,13 +536,13 @@ st.markdown(
       <div class="eyebrow">Berlin &middot; defensible GIS + ML route engine</div>
       <div class="hero-title">🚲 <span class="accent">2W1C</span>: Bicycle Safety Routing</div>
       <p class="lede">Compare the shortest route, a severity-weighted historical GIS-risk
-         route, and a leakage-safe ML road-risk route. The app separates spatial
+         route, and an ML road-risk route. The app separates spatial
          risk, ML diagnostics, and severity evidence instead of hiding model limitations.</p>
       <div class="chips">
         <span class="chip"><span class="dot" style="background:{ROUTE_STYLES['fastest'][1]}"></span><b>Fastest</b> &middot; distance only</span>
         <span class="chip"><span class="dot" style="background:{ROUTE_STYLES['historical'][1]}"></span><b>Historical</b> &middot; GIS risk baseline</span>
-        <span class="chip"><span class="dot" style="background:{ROUTE_STYLES['ml'][1]}"></span><b>ML</b> &middot; leakage-safe road-only model</span>
-        <span class="chip"><span class="dot" style="background:{ROUTE_STYLES['ml'][1]}"></span><b>Severity</b> &middot; evidence, not a route guarantee</span>
+        <span class="chip"><span class="dot" style="background:{ROUTE_STYLES['spf'][1]}"></span><b>ML</b> &middot; leakage-safe road-only occurrence</span>
+        <span class="chip"><span class="dot" style="background:{ROUTE_STYLES['spf'][1]}"></span><b>Severity</b> &middot; evidence, not a route guarantee</span>
       </div>
     </div>
     """,
@@ -531,6 +562,13 @@ if run_button or st.session_state.run_example:
     if st.session_state.destination_address_status is None:
         check_destination_address()
 
+    # Reuse the coordinates already geocoded during address validation so the
+    # route does not re-hit Nominatim for the same text.
+    def _coords(status):
+        if status and status.get("ok") and status.get("lat") is not None:
+            return (float(status["lat"]), float(status["lon"]))
+        return None
+
     try:
         with st.spinner("Building three routes across Berlin…"):
             engine = load_engine()
@@ -539,6 +577,8 @@ if run_button or st.session_state.run_example:
                 destination_address=st.session_state.destination_address_input,
                 safety_preference=safety_preference,
                 hour=hour,
+                start_coords=_coords(st.session_state.start_address_status),
+                destination_coords=_coords(st.session_state.destination_address_status),
             )
         st.session_state.route_result = result
         st.session_state.route_map = route_map
@@ -559,6 +599,7 @@ def lane_card(
     caption: str,
     rows: list[tuple[str, str]],
     reduction_pct: float | None = None,
+    scale: str | None = None,
 ):
     name, colour = ROUTE_STYLES[kind]
 
@@ -569,9 +610,12 @@ def lane_card(
         else:
             value, fill = f"+{abs(reduction_pct):.1f}%", "#DC3B32"
         width = max(3.0, min(100.0, abs(reduction_pct)))
+        # Name the scale so the two cards are not read as directly comparable —
+        # each reduction is on its own model's risk scale.
+        cap_label = f"{scale} vs fastest" if scale else "risk vs fastest"
         bar = (
             f'<div class="bar"><span style="width:{width:.0f}%;background:{fill}"></span></div>'
-            f'<div class="bar-cap"><span>risk vs fastest</span><span>{value}</span></div>'
+            f'<div class="bar-cap"><span>{html.escape(cap_label)}</span><span>{value}</span></div>'
         )
 
     kv = "".join(
@@ -664,12 +708,13 @@ with tab1:
                     ("segments", f"{int(num(historical, 'n_segments')):d}"),
                 ],
                 reduction_pct=hist_reduction,
+                scale="historical-risk",
             )
 
         with cols[2]:
             if ml:
                 lane_card(
-                    "ml",
+                    "spf",
                     num(ml, "distance_km"),
                     detour_caption(num(ml, "distance_km"), ref_km),
                     [
@@ -678,11 +723,12 @@ with tab1:
                         ("segments", f"{int(num(ml, 'n_segments')):d}"),
                     ],
                     reduction_pct=ml_reduction,
+                    scale="ML-risk",
                 )
             else:
                 st.markdown(
                     '<div class="lane" style="--c:#12A55F">'
-                    '<div class="tag">ML road risk</div>'
+                    '<div class="tag">ML road-risk</div>'
                     '<div class="big">—<small>km</small></div>'
                     '<div class="delta">model file not loaded</div>'
                     '<div class="kv kv-first"><span>status</span><b>unavailable</b></div>'
@@ -695,6 +741,126 @@ with tab1:
             "are reported on their own scales and should not be interpreted as personal crash probabilities."
         )
 
+        # Which risk model is actually most predictive — the apples-to-apples,
+        # held-out comparison (all three scored on the same future crashes). This
+        # is the honest "which route to trust" signal, unlike the per-card
+        # reductions which each live on their own scale.
+        _temporal = read_json_if_exists(TEMPORAL_VALIDATION_FILE)
+        _surfaces = [
+            s for s in (_temporal or {}).get("surfaces", [])
+            if s.get("top_decile_recall") is not None
+        ]
+        if _surfaces:
+            _labels = {
+                "historical_gis": "Historical GIS",
+                "occurrence_ml": "ML occurrence",
+                "frequency_nb": "Frequency SPF",
+            }
+            # Show a single number per model. Use the (hidden) bootstrap CIs only
+            # to decide the label: one model is "← best" only if its 95% interval
+            # clears the runner-up's (no overlap); otherwise every model whose
+            # interval overlaps the leader's is marked "statistically tied".
+            def _tags(rows, rkey, lokey, hikey, leader_test=None):
+                valid = [r for r in rows if r.get(rkey) is not None]
+                if not valid:
+                    return {}
+                leader = max(valid, key=lambda r: r[rkey])
+                # A significant paired-difference test crowns a real winner even
+                # when the marginal CIs overlap.
+                if leader_test and leader_test.get("significant"):
+                    lname = leader_test.get("leader")
+                    return {id(r): ("best" if r.get("surface") == lname else "") for r in valid}
+                have_ci = all(
+                    r.get(lokey) is not None and r.get(hikey) is not None for r in valid
+                )
+                if not have_ci:
+                    return {id(r): ("best" if r is leader else "") for r in valid}
+                lo, hi = leader[lokey], leader[hikey]
+                tied = [r for r in valid if not (r[hikey] < lo or r[lokey] > hi)]
+                # A clear winner (its interval clears the runner-up) → "best".
+                if len(tied) <= 1:
+                    return {id(r): ("best" if r is leader else "") for r in valid}
+                # Otherwise a tie. Still surface the leader honestly: if exactly one
+                # model has the top point estimate, mark it "highest" (within noise);
+                # the rest of the overlapping set is "tied".
+                top = leader[rkey]
+                unique_top = sum(1 for r in valid if r[rkey] == top) == 1
+                out = {}
+                for r in valid:
+                    if r not in tied:
+                        out[id(r)] = ""
+                    elif r is leader and unique_top:
+                        out[id(r)] = "highest"
+                    else:
+                        out[id(r)] = "tied"
+                return out
+
+            def _mark(tag):
+                if tag == "best":
+                    return ' <b style="color:#12A55F">← best</b>'
+                if tag == "highest":
+                    return (
+                        ' <b style="color:#12A55F">← highest</b>'
+                        ' <span style="opacity:.6">(within noise)</span>'
+                    )
+                if tag == "tied":
+                    return ' <span style="opacity:.6">— statistically tied</span>'
+                return ""
+
+            _has_ci = any(s.get("ci_low") is not None for s in _surfaces)
+
+            _tag_all = _tags(
+                _surfaces, "top_decile_recall", "ci_low", "ci_high",
+                _temporal.get("overall_leader_test"),
+            )
+            _items = ""
+            for s in _surfaces:
+                _nm = html.escape(_labels.get(s["surface"], s["surface"]))
+                _rec = 100.0 * float(s["top_decile_recall"])
+                _items += (
+                    f'<li>{_nm}: {_rec:.0f}% of future crashes fall in its '
+                    f'top-10% streets{_mark(_tag_all.get(id(s), ""))}</li>'
+                )
+
+            # Second view: only crashes on streets with no crash in the training
+            # window — the honest test for a road-feature model.
+            _nbc = [s for s in _surfaces if s.get("nbc_recall") is not None]
+            _nbc_block = ""
+            if _nbc:
+                _tag_nbc = _tags(
+                    _nbc, "nbc_recall", "nbc_ci_low", "nbc_ci_high",
+                    _temporal.get("nbc_leader_test"),
+                )
+                _nbc_items = ""
+                for s in _nbc:
+                    _nm = html.escape(_labels.get(s["surface"], s["surface"]))
+                    _r = 100.0 * float(s["nbc_recall"])
+                    _nbc_items += f'<li>{_nm}: {_r:.0f}%{_mark(_tag_nbc.get(id(s), ""))}</li>'
+                _nbc_block = (
+                    '<div style="margin-top:.6rem"><b>On streets with no past crash</b> '
+                    '<span style="opacity:.7">(where a historical crash map is blind — '
+                    'the honest test for a road-feature model):</span>'
+                    f'<ul style="margin:.35rem 0 0 1.1rem;padding:0">{_nbc_items}</ul></div>'
+                )
+
+            _tie_note = (
+                '<div style="margin-top:.5rem;opacity:.65;font-size:.85em">'
+                '&ldquo;statistically tied&rdquo; = the models&rsquo; 95% bootstrap '
+                'intervals overlap, so the difference is within noise.</div>'
+            ) if _has_ci else ""
+
+            _ty = html.escape(str(_temporal.get("train_years", "")))
+            _te = html.escape(str(_temporal.get("test_years", "")))
+            st.markdown("")
+            st.markdown(
+                '<div class="panel"><b>Which model predicts best?</b> '
+                '<span style="opacity:.7">Tested on later crashes it never saw '
+                f'({_ty} → {_te}); a random 10% of streets would catch 10%.</span>'
+                f'<ul style="margin:.45rem 0 0 1.1rem;padding:0">{_items}</ul>'
+                f'{_nbc_block}{_tie_note}</div>',
+                unsafe_allow_html=True,
+            )
+
         st.markdown("")
         left, right = st.columns([1.4, 1], gap="large")
 
@@ -704,7 +870,7 @@ with tab1:
                 f'<div class="legend">'
                 f'<span><span class="dot" style="background:{ROUTE_STYLES["fastest"][1]}"></span>Fastest</span>'
                 f'<span><span class="dot" style="background:{ROUTE_STYLES["historical"][1]}"></span>Historical GIS risk</span>'
-                f'<span><span class="dot" style="background:{ROUTE_STYLES["ml"][1]}"></span>ML road risk</span>'
+                f'<span><span class="dot" style="background:{ROUTE_STYLES["spf"][1]}"></span>ML road-risk</span>'
                 f'</div>',
                 unsafe_allow_html=True,
             )
@@ -759,9 +925,10 @@ with tab2:
     st.markdown("")
     st.markdown(
         '<div class="panel"><b>Learning task</b><br>'
-        'Road segment features → relative accident-occurrence risk. The deployed model is '
-        'road-only because the leakage analysis showed that time-only occurrence features '
-        'currently have no useful signal under the negative-sampling design.</div>',
+        'Road segment features → relative accident-occurrence risk. This occurrence classifier is '
+        'a leakage diagnostic; the retained variant is road-only because the leakage analysis showed '
+        'time-only occurrence features have no useful signal under the negative-sampling design. '
+        'The route itself is driven by this road-only occurrence model (Route tab).</div>',
         unsafe_allow_html=True,
     )
 
@@ -876,7 +1043,8 @@ with tab5:
     st.markdown(
         '<div class="panel"><b>Limitations</b><br>'
         'Unfallatlas has crashes but not bicycle exposure counts. Therefore the app reports '
-        'relative model scores, not personal crash probabilities. The hour slider is retained '
-        'for transparency, but the current deployed occurrence model is mainly spatial.</div>',
+        'relative model scores, not personal crash probabilities. The occurrence model gives relative '
+        'crash probability per edge, not per cyclist-kilometre, so a low-exposure class constraint is applied on top. '
+        'The hour slider is retained for transparency, but the route models are spatial and do not vary by hour.</div>',
         unsafe_allow_html=True,
     )

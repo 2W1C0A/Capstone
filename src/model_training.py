@@ -31,7 +31,15 @@ from .data_pipeline import get_season
 
 
 TIME_FEATURES = ["month", "hour", "day_of_week", "is_weekend", "is_rush_hour", "is_night"]
-ROAD_NUMERIC_FEATURES = ["edge_length_m", "has_cycleway", "maxspeed_num", "maxspeed_missing"]
+# Road attributes + graph-structural features. junction_ends / max_degree come
+# from node degrees (osm_network.build_edge_features), NOT from any accident data,
+# so they stay leakage-safe. Junctions are where crashes concentrate (the frequency
+# SPF's strongest covariate), and this is the signal the occurrence model was
+# missing versus the spatially-smoothed historical GIS surface.
+ROAD_NUMERIC_FEATURES = [
+    "edge_length_m", "has_cycleway", "maxspeed_num", "maxspeed_missing",
+    "junction_ends", "max_degree",
+]
 ROAD_CATEGORICAL_FEATURES = ["highway_simple"]
 
 # The deployed ML model intentionally uses road-only features. Time-only has

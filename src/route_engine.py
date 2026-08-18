@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List
@@ -16,9 +18,11 @@ from .config import (
     OCCURRENCE_MODEL_FILE,
     OSM_GRAPH_FILE,
     ROUTE_RISK_FILE,
+    SNAPPED_ACCIDENTS_FILE,
+    TEMPORAL_VALIDATION_FILE,
 )
 from .model_training import predict_edge_occurrence_risk
-from .osm_network import edge_uid
+from .osm_network import edge_uid, load_graph_fast
 
 
 Route = List[Any]
@@ -41,7 +45,17 @@ class RouteSummary:
 
 
 class RouteEngine:
-    """Compare fastest, historical GIS-risk and leakage-safe ML road-risk routes."""
+    """Compare fastest, historical GIS-risk and ML road-risk routes.
+
+    The third route is driven by the leakage-safe road-only occurrence model
+    (src/model_training.py), which predicts relative crash probability per edge
+    from road features only. Its 0-1 score feeds the shared cost function together
+    with the measured low-exposure class constraint applied in `_cost_weight`.
+
+    Routing costs are evaluated lazily by a NetworkX weight callable
+    (`_cost_weight`) over the per-edge constants baked in once at init by
+    `_precompute_edge_constants`, so a request no longer rewrites the whole graph.
+    """
 
     def __init__(
         self,
@@ -59,7 +73,7 @@ class RouteEngine:
         if not self.route_risk_file.exists():
             raise FileNotFoundError(f"Missing route risk table: {self.route_risk_file}")
 
-        self.G = ox.load_graphml(self.graph_file)
+        self.G = load_graph_fast(self.graph_file)
         self.route_risk = pd.read_csv(self.route_risk_file)
         self.route_risk["edge_uid"] = self.route_risk["edge_uid"].astype(str)
 
@@ -67,9 +81,86 @@ class RouteEngine:
         if not self.historical_lookup:
             self.historical_lookup = self._lookup("historical_risk_norm")
 
-        self.model_bundle = joblib.load(self.occurrence_model_file) if self.occurrence_model_file.exists() else None
-        self.ml_risk_table = self._build_ml_risk_table() if self.model_bundle is not None else None
-        self.ml_lookup = self._lookup_from_table(self.ml_risk_table, "ml_occurrence_risk") if self.ml_risk_table is not None else {}
+        # Third route = leakage-safe road-only occurrence model. Prefer a
+        # per-edge column the pipeline may have persisted (instant); otherwise
+        # load the saved occurrence model and score the network once at startup.
+        if "ml_occurrence_risk" in self.route_risk.columns:
+            self.ml_bundle = None
+            self.ml_risk_table = self.route_risk
+            self.ml_lookup = self._lookup_from_table(self.route_risk, "ml_occurrence_risk")
+        else:
+            self.ml_bundle = (
+                joblib.load(self.occurrence_model_file)
+                if self.occurrence_model_file.exists()
+                else None
+            )
+            self.ml_risk_table = (
+                self._build_ml_risk_table() if self.ml_bundle is not None else None
+            )
+            self.ml_lookup = (
+                self._lookup_from_table(self.ml_risk_table, "ml_occurrence_risk")
+                if self.ml_risk_table is not None
+                else {}
+            )
+
+        # Bake per-edge constants onto the graph ONCE. Risk does not depend on
+        # the request (only safety_preference and hour do), so there is no reason
+        # to rewrite 441k edges on every route. See docs finding #10.
+        self._precompute_edge_constants()
+
+    def _precompute_edge_constants(self) -> None:
+        """Attach immutable per-edge constants used by the routing weights.
+
+        Runs a single pass at engine init. After this the graph is only ever
+        read during routing, never written — which also removes the shared-state
+        bug where two concurrent app sessions (the engine is cached with
+        @st.cache_resource) overwrote each other's per-request risk attributes.
+        """
+        highway_lookup = dict(
+            zip(
+                self.route_risk["edge_uid"].astype(str),
+                self.route_risk["highway_simple"].astype(str),
+            )
+        )
+        for u, v, k, data in self.G.edges(keys=True, data=True):
+            uid = edge_uid(u, v, k)
+            data["length_m"] = float(data.get("length", 1.0))
+            data["hist_risk"] = float(np.clip(self.historical_lookup.get(uid, 0.0), 0.0, 1.0))
+            data["ml_risk"] = float(np.clip(self.ml_lookup.get(uid, 0.0), 0.0, 1.0))
+            data["low_exposure"] = highway_lookup.get(uid, "") in LOW_EXPOSURE_CLASSES
+
+        # Node lat/lon for the A* straight-line heuristic, and a per-engine
+        # geocode cache (the engine is cached with @st.cache_resource, so this
+        # persists across requests and skips repeat Nominatim calls).
+        self._node_xy = {
+            n: (float(d["y"]), float(d["x"]))
+            for n, d in self.G.nodes(data=True)
+            if "y" in d and "x" in d
+        }
+        self._geocode_cache: dict[str, tuple] = {}
+
+    @staticmethod
+    def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+        r = 6_371_000.0
+        p1, p2 = math.radians(lat1), math.radians(lat2)
+        dphi = math.radians(lat2 - lat1)
+        dlmb = math.radians(lon2 - lon1)
+        a = math.sin(dphi / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dlmb / 2) ** 2
+        return 2 * r * math.asin(math.sqrt(a))
+
+    def _straight_line_heuristic(self, u, target) -> float:
+        """Admissible A* heuristic: straight-line metres from `u` to `target`.
+
+        Every routing cost is `length * (1 + m*risk) + penalty >= length`, and
+        the straight-line distance never exceeds the road distance, so this is a
+        lower bound on the remaining cost for all three weightings — A* therefore
+        returns the same optimal path as Dijkstra, but explores far fewer nodes.
+        """
+        a = self._node_xy.get(u)
+        b = self._node_xy.get(target)
+        if a is None or b is None:
+            return 0.0
+        return self._haversine_m(a[0], a[1], b[0], b[1])
 
     def _lookup_from_table(self, df: pd.DataFrame | None, col: str) -> dict[str, float]:
         if df is None or col not in df.columns:
@@ -81,8 +172,17 @@ class RouteEngine:
     def _lookup(self, col: str) -> dict[str, float]:
         return self._lookup_from_table(self.route_risk, col)
 
-    def _build_ml_risk_table(self) -> pd.DataFrame:
-        return predict_edge_occurrence_risk(self.route_risk, self.model_bundle)
+    def _build_ml_risk_table(self) -> pd.DataFrame | None:
+        """Fallback: score the network with the occurrence model at startup.
+
+        Only reached when the pipeline did not persist `ml_occurrence_risk` into
+        the route-risk CSV. Degrades to no ML route on any failure.
+        """
+        try:
+            return predict_edge_occurrence_risk(self.route_risk, self.ml_bundle)
+        except Exception as exc:  # noqa: BLE001 - degrade gracefully in the app
+            print(f"ML route disabled: could not score edges ({exc}).")
+            return None
 
     # ------------------------------------------------------------------
     # Robust address handling
@@ -180,12 +280,6 @@ class RouteEngine:
         tried = "\n".join(f"- {e}" for e in errors[-5:])
         raise ValueError(
             "Could not geocode this address inside Berlin.\n\n"
-            f"Input: {address}\n\n"
-            "Try a more complete format, for example:\n"
-            "- Zillestraße 21, 10585 Berlin, Germany\n"
-            "- Alexanderplatz, Berlin, Germany\n"
-            "- 52.5219, 13.4132\n\n"
-            f"Geocoding attempts:\n{tried}"
         )
 
     @staticmethod
@@ -214,6 +308,14 @@ class RouteEngine:
             }
 
     def nearest_node_from_address(self, address: str):
+        # Cache (node, coords) per normalised address for the life of the engine.
+        # Geocoding is a Nominatim round-trip and often the slowest part of a
+        # request; re-running with a different safety slider should not repay it.
+        key = self._normalise_address(address)
+        cache = getattr(self, "_geocode_cache", None)
+        if cache is not None and key in cache:
+            return cache[key]
+
         lat, lon, query_used = self._geocode_with_fallbacks(address)
         try:
             node = ox.distance.nearest_nodes(self.G, X=lon, Y=lat)
@@ -222,57 +324,75 @@ class RouteEngine:
                 f"Address was found as '{query_used}' at ({lat:.5f}, {lon:.5f}), "
                 f"but snapping it to the OSM graph failed: {exc}"
             ) from exc
-        return node, (lat, lon)
+        result = (node, (lat, lon))
+        if cache is not None:
+            cache[key] = result
+        return result
 
     # ------------------------------------------------------------------
     # Costs and routing
     # ------------------------------------------------------------------
 
-    def _attach_costs(self, risk_lookup: dict[str, float], safety_preference: int = 7, hour: int | None = None) -> None:
+    @staticmethod
+    def _length_weight(u, v, keydict) -> float:
+        """Distance-only weight. Parallel edges: take the shortest."""
+        return min(d.get("length_m", d.get("length", 1.0)) for d in keydict.values())
+
+    def _cost_weight(self, risk_attr: str, safety_preference: int, hour: int | None):
+        """Return a NetworkX weight callable for one risk model.
+
+        Dijkstra calls this only for the edges it actually relaxes — a few
+        thousand on a city route — instead of the old approach that wrote a cost
+        to all ~441k edges first. `safety_preference` and `hour` are captured in
+        the closure; the per-edge constants (`length_m`, `<risk_attr>`,
+        `low_exposure`) were baked in at init.
+        """
         penalty_multiplier = float(np.clip(safety_preference, 1, 10)) / 2.0
         is_night = hour is not None and (int(hour) >= 22 or int(hour) <= 4)
 
-        highway_lookup = dict(zip(self.route_risk["edge_uid"].astype(str), self.route_risk["highway_simple"].astype(str)))
+        def weight(u, v, keydict) -> float:
+            best = None
+            for d in keydict.values():
+                length = d.get("length_m", d.get("length", 1.0))
+                risk = d.get(risk_attr, 0.0)
+                hard_penalty = 0.0
+                if d.get("low_exposure"):
+                    hard_penalty += 60.0
+                    if is_night:
+                        hard_penalty += 180.0
+                cost = length * (1.0 + penalty_multiplier * risk) + hard_penalty
+                if best is None or cost < best:
+                    best = cost
+            return best
 
-        for u, v, k, data in self.G.edges(keys=True, data=True):
-            uid = edge_uid(u, v, k)
-            length = float(data.get("length", 1.0))
-            risk = float(np.clip(risk_lookup.get(uid, 0.0), 0.0, 1.0))
-            highway = highway_lookup.get(uid, "")
-
-            hard_penalty = 0.0
-            if highway in LOW_EXPOSURE_CLASSES:
-                hard_penalty += 60.0
-            if is_night and highway in LOW_EXPOSURE_CLASSES:
-                hard_penalty += 180.0
-
-            data["length_cost"] = length
-            data["active_risk"] = risk
-            data["safe_cost"] = length * (1.0 + penalty_multiplier * risk) + hard_penalty
-
-    def _attach_distance_costs(self) -> None:
-        for _, _, _, data in self.G.edges(keys=True, data=True):
-            data["length_cost"] = float(data.get("length", 1.0))
+        return weight
 
     @staticmethod
-    def _best_edge_data(G: nx.MultiDiGraph, u, v, weight: str) -> dict | None:
+    def _best_edge_data(G: nx.MultiDiGraph, u, v) -> dict | None:
         edges = G.get_edge_data(u, v)
         if edges is None:
             return None
-        best_key = min(edges, key=lambda k: edges[k].get(weight, 1e12))
+        best_key = min(edges, key=lambda k: edges[k].get("length_m", edges[k].get("length", 1e12)))
         return edges[best_key]
 
-    def summarize_route(self, route: Route, weight: str = "length_cost") -> RouteSummary:
+    def summarize_route(self, route: Route, risk_attr: str | None = None) -> RouteSummary:
+        """Length and length-weighted risk of a route.
+
+        `risk_attr` selects which precomputed risk to weight by (`hist_risk`,
+        `ml_risk`, or None for distance-only). No per-request graph state is
+        read, so a route can be summarised under any risk model without
+        re-attaching costs.
+        """
         total_length = 0.0
         risk_exposure = 0.0
         n = 0
 
         for u, v in zip(route[:-1], route[1:]):
-            data = self._best_edge_data(self.G, u, v, weight)
+            data = self._best_edge_data(self.G, u, v)
             if data is None:
                 continue
-            length = float(data.get("length", 0.0))
-            risk = float(data.get("active_risk", 0.0))
+            length = float(data.get("length_m", data.get("length", 0.0)))
+            risk = float(data.get(risk_attr, 0.0)) if risk_attr else 0.0
             total_length += length
             risk_exposure += length * risk
             n += 1
@@ -291,37 +411,64 @@ class RouteEngine:
             return 0.0
         return 100.0 * (base - new) / base
 
+    def nearest_node_from_coords(self, lat: float, lon: float):
+        """Snap already-resolved coordinates to the nearest graph node.
+
+        Lets the app pass the lat/lon it already geocoded when validating the
+        address, so a route does not re-hit Nominatim for the same text.
+        """
+        node = ox.distance.nearest_nodes(self.G, X=float(lon), Y=float(lat))
+        return node, (float(lat), float(lon))
+
+    def _resolve_node(self, address: str, coords: tuple | None):
+        if coords is not None and coords[0] is not None and coords[1] is not None:
+            return self.nearest_node_from_coords(coords[0], coords[1])
+        return self.nearest_node_from_address(address)
+
     def compare_routes(
         self,
         start_address: str,
         destination_address: str,
         safety_preference: int = 7,
         hour: int = 8,
+        start_coords: tuple | None = None,
+        destination_coords: tuple | None = None,
     ) -> Dict[str, Any]:
-        start_node, start_coords = self.nearest_node_from_address(start_address)
-        end_node, dest_coords = self.nearest_node_from_address(destination_address)
+        # Prefer coordinates the caller already geocoded (address validation);
+        # only geocode here when they are not supplied.
+        start_node, start_coords = self._resolve_node(start_address, start_coords)
+        end_node, dest_coords = self._resolve_node(destination_address, destination_coords)
 
         try:
-            self._attach_distance_costs()
-            fastest_route = nx.shortest_path(self.G, start_node, end_node, weight="length_cost")
+            fastest_route = nx.astar_path(
+                self.G, start_node, end_node,
+                heuristic=self._straight_line_heuristic,
+                weight=self._length_weight,
+            )
         except nx.NetworkXNoPath as exc:
             raise ValueError(
                 "No bicycle-network path was found between the two addresses. "
                 "Try addresses closer to central Berlin or check that both places are inside Berlin."
             ) from exc
 
-        fastest_distance = self.summarize_route(fastest_route, "length_cost")
+        fastest_distance = self.summarize_route(fastest_route)
 
-        self._attach_costs(self.historical_lookup, safety_preference=safety_preference, hour=hour)
-        fastest_hist = self.summarize_route(fastest_route, "length_cost")
-        historical_route = nx.shortest_path(self.G, start_node, end_node, weight="safe_cost")
-        historical_summary = self.summarize_route(historical_route, "safe_cost")
+        hist_weight = self._cost_weight("hist_risk", safety_preference, hour)
+        fastest_hist = self.summarize_route(fastest_route, "hist_risk")
+        historical_route = nx.astar_path(
+            self.G, start_node, end_node,
+            heuristic=self._straight_line_heuristic, weight=hist_weight,
+        )
+        historical_summary = self.summarize_route(historical_route, "hist_risk")
 
         if self.ml_lookup:
-            self._attach_costs(self.ml_lookup, safety_preference=safety_preference, hour=hour)
-            fastest_ml = self.summarize_route(fastest_route, "length_cost")
-            ml_route = nx.shortest_path(self.G, start_node, end_node, weight="safe_cost")
-            ml_summary = self.summarize_route(ml_route, "safe_cost")
+            ml_weight = self._cost_weight("ml_risk", safety_preference, hour)
+            fastest_ml = self.summarize_route(fastest_route, "ml_risk")
+            ml_route = nx.astar_path(
+                self.G, start_node, end_node,
+                heuristic=self._straight_line_heuristic, weight=ml_weight,
+            )
+            ml_summary = self.summarize_route(ml_route, "ml_risk")
         else:
             fastest_ml = None
             ml_route = None
@@ -394,6 +541,157 @@ class RouteEngine:
         )
         return "\n".join(lines)
 
+    @staticmethod
+    def _held_out_comparison_block(
+        validation_file: str | Path = TEMPORAL_VALIDATION_FILE,
+    ) -> list[str]:
+        """One line per model: how well each predicts future crashes it never saw.
+
+        Reads the JSON written by spatial_risk.temporal_validation. Best-effort:
+        returns nothing if the file is absent or has no `surfaces`, so the
+        recommendation is unchanged.
+        """
+        try:
+            path = Path(validation_file)
+            if not path.exists():
+                return []
+            data = json.loads(path.read_text(encoding="utf-8"))
+            rows = [
+                s for s in (data.get("surfaces") or [])
+                if s.get("top_decile_recall") is not None
+            ]
+            if not rows:
+                return []
+
+            label = {
+                "historical_gis": "Historical GIS",
+                "occurrence_ml": "ML occurrence",
+                "frequency_nb": "Frequency SPF",
+            }
+            best = max(rows, key=lambda s: s["top_decile_recall"])
+            train_years = str(data.get("train_years", "")).strip()
+            test_years = str(data.get("test_years", "")).strip()
+
+            lines = [
+                "",
+                f"Which model predicts best (tested on later crashes it never saw, "
+                f"{train_years} → {test_years}; a random 10% of streets would catch 10%):",
+            ]
+            for s in rows:
+                name = label.get(s["surface"], s["surface"])
+                recall = 100.0 * float(s["top_decile_recall"])
+                tag = "  ← best" if s is best else ""
+                lines.append(
+                    f"- {name}: {recall:.0f}% of future crashes fall in its top-10% streets{tag}"
+                )
+            return lines
+        except Exception:
+            return []
+
+    def junction_ksi_sites(self, min_ksi: int = 2) -> pd.DataFrame:
+        """Junctions with a record of serious or fatal bicycle crashes.
+
+        Aggregated to junctions rather than plotted per crash: 80.8% of crashes
+        fall within 20 m of a node, and 88.5% of junctions carrying any serious
+        crash carry exactly one. Requiring two, or any fatality, keeps every place
+        someone died while cutting 3,395 junctions to about 430.
+
+        Read once and held on the instance — app.py caches the engine, so the CSV
+        is not re-read per request.
+        """
+        if getattr(self, "_ksi_sites", None) is not None:
+            return self._ksi_sites
+
+        acc = pd.read_csv(SNAPPED_ACCIDENTS_FILE)
+        ksi = acc[(acc["is_ksi"] == 1) & (acc["near_junction"] == 1)]
+
+        j = (
+            ksi.groupby("nearest_node")
+            .agg(
+                ksi=("is_ksi", "size"),
+                fatal=("is_fatal", "sum"),
+                truck=("is_truck", "sum"),
+                lat=("latitude", "median"),
+                lon=("longitude", "median"),
+            )
+            .reset_index()
+        )
+
+        self._ksi_sites = j[(j["ksi"] >= min_ksi) | (j["fatal"] > 0)].copy()
+        # The node's own coordinates place the marker on the junction itself rather
+        # than at the centroid of the crashes assigned to it.
+        nodes = self.G.nodes
+        j["lat"] = [
+            float(nodes[n]["y"]) if n in nodes else lat
+            for n, lat in zip(j["nearest_node"], j["lat"])
+        ]
+        j["lon"] = [
+            float(nodes[n]["x"]) if n in nodes else lon
+            for n, lon in zip(j["nearest_node"], j["lon"])
+        ]
+        return self._ksi_sites
+
+    def add_junction_markers(
+        self, m: folium.Map, route: Route | None, radius_m: float = 50.0
+    ) -> int:
+        """Mark junctions along a route where serious crashes are on record.
+
+        Distances are approximated from degrees rather than reprojecting, which is
+        accurate enough at Berlin's latitude for a 50 m band.
+        """
+        coords = self.route_to_coordinates(route)
+        if not coords:
+            return 0
+
+        sites = self.junction_ksi_sites()
+        if sites.empty:
+            return 0
+
+        LAT_M = 111_320.0
+        LON_M = 111_320.0 * math.cos(math.radians(52.52))
+
+        lats = np.array([c[0] for c in coords])
+        lons = np.array([c[1] for c in coords])
+
+        dy = (sites["lat"].to_numpy()[:, None] - lats[None, :]) * LAT_M
+        dx = (sites["lon"].to_numpy()[:, None] - lons[None, :]) * LON_M
+        near = np.hypot(dx, dy).min(axis=1) <= radius_m
+
+        sel = sites[near].sort_values(["fatal", "ksi"], ascending=False)
+
+        for _, r in sel.iterrows():
+            fatal = int(r["fatal"])
+            n_ksi = int(r["ksi"])
+            n_truck = int(r["truck"])
+            n_serious = n_ksi - fatal
+
+            if fatal:
+                colour, fill, size = "#8F2A15", "#D85A30", 9 + 2 * fatal
+            else:
+                colour, fill, size = "#8A5A0B", "#F0B24A", 6 + n_ksi
+
+            lines = []
+            if fatal:
+                lines.append(f"<b>{fatal} killed</b>")
+            if n_serious:
+                lines.append(f"<b>{n_serious} seriously injured</b>")
+            if n_truck:
+                lines.append(f"{n_truck} involving a lorry")
+            lines.append("<i>recorded 2018-2025</i>")
+
+            folium.CircleMarker(
+                location=[float(r["lat"]), float(r["lon"])],
+                radius=size,
+                color=colour,
+                weight=2,
+                fill=True,
+                fill_color=fill,
+                fill_opacity=0.85,
+                tooltip=folium.Tooltip("<br>".join(lines)),
+            ).add_to(m)
+
+        return len(sel)
+    
     def route_to_coordinates(self, route: Route | None) -> list[tuple[float, float]]:
         if route is None:
             return []
@@ -410,22 +708,32 @@ class RouteEngine:
 
         m = folium.Map(location=center, zoom_start=13, tiles="OpenStreetMap")
         folium.PolyLine(self.route_to_coordinates(result["fastest_route"]), color="red", weight=5, opacity=0.75, tooltip="Fastest").add_to(m)
-        folium.PolyLine(self.route_to_coordinates(result["historical_route"]), color="orange", weight=5, opacity=0.75, tooltip="Historical GIS-risk").add_to(m)
+        folium.PolyLine(self.route_to_coordinates(result["historical_route"]), color="#1f4e8c", weight=5, opacity=0.9, tooltip="Historical GIS-risk").add_to(m)
 
         if result.get("ml_route") is not None:
             folium.PolyLine(self.route_to_coordinates(result["ml_route"]), color="green", weight=5, opacity=0.85, tooltip="ML road-risk").add_to(m)
+
+        # Junctions on the fastest route with recorded serious crashes. Drawn
+        # before the start and destination pins so those stay on top.
+        
+        n_flagged = self.add_junction_markers(m, result.get("fastest_route"))
 
         folium.Marker(start, tooltip="Start", icon=folium.Icon(color="blue", icon="play")).add_to(m)
         folium.Marker(dest, tooltip="Destination", icon=folium.Icon(color="black", icon="flag")).add_to(m)
 
         legend = """
-        <div style="position: fixed; bottom: 40px; left: 40px; z-index: 9999;
-                    background: white; padding: 12px; border: 2px solid grey;
-                    border-radius: 6px; font-size: 14px;">
-            <b>Route Legend</b><br>
-            <span style="color:red;">■</span> Fastest route<br>
-            <span style="color:orange;">■</span> Historical GIS-risk route<br>
-            <span style="color:green;">■</span> ML road-risk route<br>
+        <div style="position: absolute; bottom: 12px; left: 12px; z-index: 9999;
+            background: rgba(255,255,255,0.94); color: #1a1a1a; padding: 8px 10px;
+            border: 1px solid #cccccc; border-radius: 6px;
+            font-size: 12px; line-height: 1.5;">
+        
+            <div style="font-weight: 600; margin-bottom: 6px; color: #1a1a1a;">Route legend</div>
+            <div style="color: #1a1a1a;"><span style="color:#d64545;">&#9632;</span>&nbsp; Fastest route</div>
+            <div style="color: #1a1a1a;"><span style="color:#1F4E8C;">&#9632;</span>&nbsp; Historical GIS-risk route</div>
+            <div style="color: #1a1a1a;"><span style="color:#12A55F;">&#9632;</span>&nbsp; ML road-risk route</div>
+            <div style="margin-top: 8px; padding-top: 6px; border-top: 1px solid #e0e0e0; color: #1a1a1a;"><span style="color:#D85A30;">&#9679;</span>&nbsp; Junction where a cyclist died</div>
+            <div style="color: #1a1a1a;"><span style="color:#F0B24A;">&#9679;</span>&nbsp; Junction with serious injuries</div>
+            <div style="margin-top: 6px; font-size: 11px; color: #666666; max-width: 220px; line-height: 1.4;">Recorded 2018&ndash;2025. Counts, not probabilities &mdash; busy junctions accumulate more crashes.</div>
         </div>
         """
         m.get_root().html.add_child(folium.Element(legend))
